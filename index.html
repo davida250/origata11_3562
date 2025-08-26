@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <title>Origata v0.24</title>
+  <title>Origata v0.25</title>
   <meta name="theme-color" content="#050509" />
   <style>
     html, body { height: 100%; margin: 0; background: #050509; }
@@ -53,21 +53,13 @@
       <label>
         Model / Preset
         <select id="preset">
-          <optgroup label="Bird">
-            <option value="bird-demo">Flapping Bird (Demo, sequential masks)</option>
-            <option value="bird-fold">Flapping Bird (MIT FOLD import)</option>
-          </optgroup>
-          <optgroup label="Simple folds">
-            <option value="half-vertical-valley">Half Vertical (Valley)</option>
-            <option value="half-horizontal-valley">Half Horizontal (Valley)</option>
-            <option value="diagonal-valley">Diagonal (Valley)</option>
-            <option value="gate-valley">Gate Fold (2 × Valley)</option>
-            <option value="accordion-5">Accordion (5 creases, alt M/V)</option>
-            <option value="single-vertical-mountain">Single Vertical (Mountain)</option>
-          </optgroup>
           <optgroup label="Crane">
             <option value="crane-demo">Crane (Demo, sequential masks)</option>
             <option value="crane-fold">Crane (MIT FOLD import)</option>
+          </optgroup>
+          <optgroup label="Bird">
+            <option value="bird-demo">Flapping Bird (Demo, sequential masks)</option>
+            <option value="bird-fold">Flapping Bird (MIT FOLD import)</option>
           </optgroup>
         </select>
       </label>
@@ -77,10 +69,7 @@
     <div class="row">
       <label>
         Fold Progress
-        <input id="progress" type="range" min="0" max="1" step="0.001" value="0.7" />
-      </label>
-      <label class="muted" title="Auto-oscillate this slider">
-        <input id="autoProgress" type="checkbox" /> Auto
+        <input id="progress" type="range" min="0" max="1" step="0.001" value="0" />
       </label>
       <button id="btnAnim">Play</button>
       <button id="btnReset">Reset</button>
@@ -91,10 +80,7 @@
     <div class="row">
       <label>
         Speed
-        <input id="speed" type="range" min="0.05" max="3" step="0.01" value="0.9" />
-      </label>
-      <label class="muted" title="Auto-oscillate this slider">
-        <input id="autoSpeed" type="checkbox" /> Auto
+        <input id="speed" type="range" min="0.05" max="3" step="0.01" value="0.25" />
       </label>
       <label>
         Easing
@@ -109,7 +95,7 @@
 
     <div class="row">
       <button id="btnSnap" title="Save current frame as PNG">Save PNG</button>
-      <label class="muted">Bloom is toned down by default (you can tweak in GUI)</label>
+      <label class="muted">Look controls are in the lil‑gui panel (top‑right). Each has an Auto toggle.</label>
     </div>
   </div>
 
