@@ -1,16 +1,18 @@
 /**
- * Origami — Paper-Like Folds + Crane
+ * Origami — Paper-Like Folds + Crane + Bird
  * - Rigid-hinge folds with sequential propagation (later creases move with the paper).
- * - Adds convex MASKS per crease to simulate regional folds (needed for crane-like steps).
+ * - Adds convex MASKS per crease to simulate regional folds (needed for crane/bird-like steps).
  * - Two Crane options:
  *   (A) "Crane (Demo)" — kinematic approximation with masks so it folds step-by-step.
  *   (B) "Crane (MIT FOLD)" — loads a solver-accurate crane (.fold) exported from
- *       origamisimulator.org (Examples → Crane (3D)/(flat) → File → Save Simulation as FOLD).  [MIT app supports FOLD export of folded states.] 
- * - Shader/look preserved (iridescence + fibers + FXAA + ACES); bloom default lowered.
+ *       origamisimulator.org (Examples → Crane (3D)/(flat) → File → Save Simulation as FOLD).
+ * - Two Bird options:
+ *   (A) "Flapping Bird (Demo)" — kinematic, sequential, masked.
+ *   (B) "Flapping Bird (MIT FOLD)" — load ./bird.fold saved from the MIT app.
  *
  * Notes / references:
- * • MIT Origami Simulator folds all creases simultaneously via a GPU solver and exports FOLD/OBJ. :contentReference[oaicite:1]{index=1}
- * • FOLD format spec + viewer (vertices/edges/faces, assignments, fold angles). :contentReference[oaicite:2]{index=2}
+ * • MIT Origami Simulator folds all creases simultaneously via a GPU solver and exports FOLD/OBJ.
+ * • FOLD format spec + viewer (vertices/edges/faces, assignments, fold angles).
  */
 
 import * as THREE from 'three';
@@ -53,7 +55,7 @@ composer.addPass(fxaa);
 composer.addPass(new OutputPass());
 
 // ---------- Paper geometry ----------
-const SIZE = 3.0;                  // square paper for crane
+const SIZE = 3.0;                  // square paper for crane/bird
 const SEG = 180;                   // dense → crisp hinges
 const geo = new THREE.PlaneGeometry(SIZE, SIZE, SEG, SEG);
 geo.rotateX(-0.25);                // tilt
@@ -131,7 +133,16 @@ const eff = {
   mD:  Array.from({ length: MAX_CREASES }, () => Array.from({ length: MAX_MASKS_PER }, () => new THREE.Vector3(1,0,0))),
 };
 
+// ---------- Drive + HUD Auto oscillation ----------
 const drive = { animate:false, speed:0.9, progress:0.7, easing:'smoothstep', currentStep:0, stepCount:1 };
+
+const auto = {
+  progress: { enabled:false, dir:+1, rate:0.8 }, // units/sec across [0..1]
+  speed:    { enabled:false, dir:+1, rate:0.5 }  // units/sec across [min..max]
+};
+let _lastT = 0;
+
+function clamp(v, lo, hi){ return Math.max(lo, Math.min(hi, v)); }
 
 // angles per crease, respecting step boundaries
 function computeAngles(tSec){
@@ -450,8 +461,6 @@ function preset_single_vertical_mountain(){
 }
 
 // ---------- Crane (Demo) — sequential masked folds ----------
-// This is a compact, crane-like demo that uses convex masks to localize folds (petals/reverse).
-// It’s *not* a perfect historical sequence but kinematically behaves like paper and reads as a crane.
 function preset_crane_demo(){
   resetBase();
   const s = SIZE/2;
@@ -531,9 +540,46 @@ function preset_crane_demo(){
   drive.stepCount = base.count;
 }
 
+// ---------- Flapping Bird (Demo) — sequential masked folds ----------
+function preset_bird_demo(){
+  resetBase();
+  const s = SIZE/2;
+
+  // Step 0–1: diagonal pre-creases
+  addCrease({ Ax:0, Ay:0, Dx:1, Dy: 1, deg:180, sign:VALLEY });
+  addCrease({ Ax:0, Ay:0, Dx:1, Dy:-1, deg:180, sign:VALLEY });
+
+  // Step 2–3: collapse bias (square base approx via masked vertical folds)
+  addCrease({
+    Ax:0, Ay:0, Dx:0, Dy:1, deg:150, sign:VALLEY,
+    masks:[ { Ax:0, Ay:0, Dx:0, Dy: 1 }, { Ax:-0.0001, Ay:-0.0001, Dx: 1, Dy: 1 }, { Ax:0.0001, Ay:-0.0001, Dx:-1, Dy: 1 } ]
+  });
+  addCrease({
+    Ax:0, Ay:0, Dx:0, Dy:1, deg:150, sign:MOUNTAIN,
+    masks:[ { Ax:0, Ay:0, Dx:0, Dy:-1 }, { Ax:-0.0001, Ay: 0.0001, Dx: 1, Dy:-1 }, { Ax:0.0001, Ay:0.0001, Dx:-1, Dy:-1 } ]
+  });
+
+  // Step 4–5: fold wings downward (top-left / top-right)
+  addCrease({
+    Ax:0, Ay:0, Dx:1, Dy: 1, deg:120, sign:VALLEY,
+    masks:[ { Ax:0, Ay:0, Dx:0, Dy:1 }, { Ax:0, Ay:0, Dx:-1, Dy:0 } ] // y>0 & x<0
+  });
+  addCrease({
+    Ax:0, Ay:0, Dx:1, Dy:-1, deg:120, sign:VALLEY,
+    masks:[ { Ax:0, Ay:0, Dx:0, Dy:1 }, { Ax:0, Ay:0, Dx: 1, Dy:0 } ] // y>0 & x>0
+  });
+
+  // Step 6: small head (mountain) on left flap end
+  addCrease({
+    Ax:-0.45*s, Ay:-0.62*s, Dx:1, Dy:-0.2, deg:85, sign:MOUNTAIN,
+    masks:[ { Ax:-0.1, Ay:-0.2, Dx:-1, Dy:-1 }, { Ax:-0.2, Ay:-0.2, Dx:-1, Dy: 0 } ]
+  });
+
+  drive.currentStep = 0;
+  drive.stepCount = base.count;
+}
+
 // ---------- Crane (MIT FOLD) loader ----------
-// If ./crane.fold (JSON/FOLD) exists in the repo, this will load and show it as a separate mesh
-// shaded with the same fragment shader (no folding engine; it is already folded by the solver).
 let craneMesh = null;
 async function tryLoadCraneFOLD(){
   try{
@@ -541,14 +587,12 @@ async function tryLoadCraneFOLD(){
     if (!res.ok) throw new Error('no crane.fold found');
     const fold = await res.json();
 
-    // minimal FOLD: vertices_coords (2D or 3D), faces_vertices
     const verts = fold.vertices_coords || fold.vertices_coords3d || [];
     const faces = fold.faces_vertices || [];
     if (!verts.length || !faces.length) throw new Error('invalid FOLD');
 
-    // build geometry
     const g = new THREE.BufferGeometry();
-    // triangulate simple polygons naively (fan) for demo; MIT exports are triangulated often. :contentReference[oaicite:3]{index=3}
+    // naive fan triangulation in case faces aren't triangulated
     const pos = [];
     for (const f of faces){
       if (f.length < 3) continue;
@@ -572,10 +616,52 @@ async function tryLoadCraneFOLD(){
     craneMesh = mesh;
     craneMesh.position.set(0, 0, 0.001); // avoid z-fight
     scene.add(craneMesh);
-    sheet.visible = false; // hide folding sheet; we’re viewing solver result
+    sheet.visible = false; // hide folding sheet; viewing solver result
     return true;
   }catch(e){
     if (craneMesh){ scene.remove(craneMesh); craneMesh = null; }
+    sheet.visible = true;
+    return false;
+  }
+}
+
+// ---------- Flapping Bird (MIT FOLD) loader ----------
+let birdMesh = null;
+async function tryLoadBirdFOLD(){
+  try{
+    const res = await fetch('./bird.fold');
+    if (!res.ok) throw new Error('no bird.fold found');
+    const fold = await res.json();
+
+    const verts = fold.vertices_coords || fold.vertices_coords3d || [];
+    const faces = fold.faces_vertices || [];
+    if (!verts.length || !faces.length) throw new Error('invalid FOLD');
+
+    const g = new THREE.BufferGeometry();
+    const pos = [];
+    for (const f of faces){
+      if (f.length < 3) continue;
+      for (let i=1;i+1<f.length;i++){
+        const tri = [f[0], f[i], f[i+1]];
+        for (const vi of tri){
+          const v = verts[vi]; pos.push(v[0], v[1], (v.length>2? v[2]: 0));
+        }
+      }
+    }
+    g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    g.computeVertexNormals();
+    const mesh = new THREE.Mesh(g, new THREE.ShaderMaterial({
+      vertexShader: vs, fragmentShader: fs, uniforms, side: THREE.DoubleSide
+    }));
+
+    if (birdMesh) scene.remove(birdMesh);
+    birdMesh = mesh;
+    birdMesh.position.set(0, 0, 0.001);
+    scene.add(birdMesh);
+    sheet.visible = false;
+    return true;
+  }catch(e){
+    if (birdMesh){ scene.remove(birdMesh); birdMesh = null; }
     sheet.visible = true;
     return false;
   }
@@ -591,6 +677,8 @@ const btnNext   = document.getElementById('btnStepNext');
 const btnSnap   = document.getElementById('btnSnap');
 const progress  = document.getElementById('progress');
 const speed     = document.getElementById('speed');
+const autoProgressChk = document.getElementById('autoProgress');
+const autoSpeedChk    = document.getElementById('autoSpeed');
 const easingSel = document.getElementById('easing');
 const stepInfo  = document.getElementById('stepInfo');
 
@@ -614,9 +702,27 @@ Get one from origamisimulator.org:
     return;
   }
 
+  if (v === 'bird-fold'){
+    const ok = await tryLoadBirdFOLD();
+    if (!ok){
+      alert(
+`Place a solver-exported FOLD file at:
+  ./bird.fold
+
+Get one from origamisimulator.org:
+  Examples → Flapping Bird
+  File → Save Simulation as… → FOLD
+(Then refresh.)`
+      );
+    }
+    drive.animate = false; btnAnim.textContent = 'Play';
+    return;
+  }
+
   // otherwise we’re using our folding sheet
   sheet.visible = true;
   if (craneMesh){ scene.remove(craneMesh); craneMesh = null; }
+  if (birdMesh){ scene.remove(birdMesh); birdMesh = null; }
 
   if (v === 'half-vertical-valley') preset_half_vertical_valley();
   else if (v === 'half-horizontal-valley') preset_half_horizontal_valley();
@@ -625,6 +731,7 @@ Get one from origamisimulator.org:
   else if (v === 'accordion-5') preset_accordion_5();
   else if (v === 'single-vertical-mountain') preset_single_vertical_mountain();
   else if (v === 'crane-demo') preset_crane_demo();
+  else if (v === 'bird-demo') preset_bird_demo();
 
   drive.currentStep = 0;
   drive.stepCount = base.count || 1;
@@ -658,6 +765,15 @@ progress.addEventListener('input', () => { drive.progress = parseFloat(progress.
 speed.addEventListener('input', () => { drive.speed = parseFloat(speed.value); });
 easingSel.addEventListener('change', () => { drive.easing = easingSel.value; });
 
+// Auto oscillators: toggle + ensure "Play" doesn't fight with Auto Progress
+autoProgressChk && autoProgressChk.addEventListener('change', () => {
+  auto.progress.enabled = !!autoProgressChk.checked;
+  if (auto.progress.enabled){ drive.animate = false; btnAnim.textContent = 'Play'; }
+});
+autoSpeedChk && autoSpeedChk.addEventListener('change', () => {
+  auto.speed.enabled = !!autoSpeedChk.checked;
+});
+
 btnSnap.onclick = () => {
   renderer.domElement.toBlob((blob) => {
     if (!blob) return;
@@ -679,9 +795,34 @@ function updateFolding(tSec){
   computeEffectiveFrames();
   pushEffToUniforms();
 }
+function updateAutos(tSec){
+  if (!_lastT) _lastT = tSec;
+  const dt = clamp(tSec - _lastT, 0, 0.1); // clamp to avoid jumps
+  _lastT = tSec;
+
+  // Progress ∈ [0,1]
+  if (auto.progress.enabled){
+    let v = drive.progress + auto.progress.dir * auto.progress.rate * dt;
+    if (v >= 1){ v = 1; auto.progress.dir = -1; }
+    if (v <= 0){ v = 0; auto.progress.dir = +1; }
+    drive.progress = v;
+    if (progress) progress.value = v.toFixed(3);
+  }
+  // Speed ∈ [min,max]
+  if (auto.speed.enabled && speed){
+    const lo = parseFloat(speed.min || '0.05');
+    const hi = parseFloat(speed.max || '3');
+    let v = drive.speed + auto.speed.dir * auto.speed.rate * dt;
+    if (v >= hi){ v = hi; auto.speed.dir = -1; }
+    if (v <= lo){ v = lo; auto.speed.dir = +1; }
+    drive.speed = v;
+    speed.value = v.toFixed(2);
+  }
+}
 function tick(t){
   const tSec = t * 0.001;
   uniforms.uTime.value = tSec;
+  updateAutos(tSec);
   updateFolding(tSec);
   controls.update();
   composer.render();
@@ -698,4 +839,4 @@ window.addEventListener('resize', () => {
 });
 
 // ---------- Helpers for sign convention ----------
-// We follow MIT/Ghassaei conventions: valley = +°, mountain = −°. :contentReference[oaicite:4]{index=4}
+// We follow MIT/Ghassaei conventions: valley = +°, mountain = −°.
