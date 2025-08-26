@@ -1,79 +1,109 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <title>Origata — Sequential Folding + Presets + FOLD</title>
-    <meta name="theme-color" content="#050509" />
-    <style>
-      html, body { height: 100%; margin: 0; background: #050509; }
-      #app { position: fixed; inset: 0; }
-
-      .brand {
-        position: fixed; left: 12px; top: 10px; color: #a6b1c2;
-        font: 12px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-        user-select: none; opacity: 0.9;
-      }
-      @media (max-width: 560px) { .brand { display: none; } }
-
-      .hud {
-        position: fixed; left: 12px; bottom: 12px; z-index: 10;
-        display: flex; gap: 8px; flex-wrap: wrap; align-items: center;
-      }
-      .hud button, .hud select, .hud label {
-        padding: 8px 12px;
-        font: 12px/1.1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-        background: #11131a; color: #e7f2ff; border: 1px solid #2a3244; border-radius: 6px;
-        cursor: pointer;
-      }
-      .hud button:hover, .hud select:hover, .hud label:hover { background: #151a22; }
-      #foldFile { display: none; }
-    </style>
-
-    <!-- Polyfill for older engines (safe to include) -->
-    <script async src="https://unpkg.com/es-module-shims@2.6.2/dist/es-module-shims.js"></script>
-
-    <!-- Import map (native ESM; no bundler needed) -->
-    <script type="importmap">
-    {
-      "imports": {
-        "three": "https://cdn.jsdelivr.net/npm/three@0.179.1/build/three.module.js",
-        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.179.1/examples/jsm/",
-        "lil-gui": "https://cdn.jsdelivr.net/npm/lil-gui@0.20.0/dist/lil-gui.esm.js"
-      }
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Origami — Paper-Like Folds + Crane</title>
+  <meta name="theme-color" content="#050509" />
+  <style>
+    html, body { height: 100%; margin: 0; background: #050509; }
+    #app { position: fixed; inset: 0; }
+    .brand {
+      position: fixed; left: 12px; top: 10px; color: #a6b1c2;
+      font: 12px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      user-select: none; opacity: 0.9;
     }
-    </script>
+    @media (max-width: 560px) { .brand { display: none; } }
+    .hud {
+      position: fixed; left: 12px; bottom: 12px; right: 12px; z-index: 10;
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 8px; align-items: center;
+      font: 12px/1.1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    .hud * { color: #e7f2ff; }
+    .hud select, .hud button, .hud input[type="range"] {
+      padding: 8px 12px; background: #11131a; border: 1px solid #2a3244; border-radius: 6px; cursor: pointer;
+    }
+    .hud label { display: grid; gap: 4px; }
+    .hud button:hover, .hud select:hover, .hud input[type="range"]:hover { background: #151a22; }
+    .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .muted { opacity: 0.8 }
+  </style>
 
-    <!-- Optional: FOLD viewer/JS in case you later want helpers; not required to run -->
-    <script src="https://edemaine.github.io/fold/dist/fold.js"></script>
-  </head>
-  <body>
-    <div id="app"></div>
-    <div class="brand">Psychedelic Origami — drag to orbit, wheel to zoom</div>
+  <!-- ESM polyfill (safe on modern browsers) -->
+  <script async src="https://unpkg.com/es-module-shims@2.6.2/dist/es-module-shims.js"></script>
 
-    <div class="hud">
-      <select id="preset">
-        <option value="random">Preset: Random (kinematic)</option>
-        <option value="pleats">Preset: Pleats</option>
-        <option value="waterbomb">Preset: Waterbomb Grid</option>
-        <option value="miura">Preset: Miura‑ori</option>
-        <option value="bird">Preset: Bird Base (crane base)</option>
-        <option value="crane">Preset: Crane (approx)</option>
-        <option value="radial">Preset: Radial Fan</option>
-        <option value="cross">Preset: Cross</option>
-        <option value="single">Preset: Single Crease</option>
-      </select>
+  <!-- Import map: three.js + lil-gui -->
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.179.1/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.179.1/examples/jsm/",
+      "lil-gui": "https://cdn.jsdelivr.net/npm/lil-gui@0.20.0/dist/lil-gui.esm.js"
+    }
+  }
+  </script>
+</head>
+<body>
+  <div id="app"></div>
+  <div class="brand">Origami — rigid hinges • drag to orbit, wheel to zoom</div>
+
+  <div class="hud">
+    <div class="row">
+      <label>
+        Model / Preset
+        <select id="preset">
+          <optgroup label="Simple folds">
+            <option value="half-vertical-valley">Half Vertical (Valley)</option>
+            <option value="half-horizontal-valley">Half Horizontal (Valley)</option>
+            <option value="diagonal-valley">Diagonal (Valley)</option>
+            <option value="gate-valley">Gate Fold (2 × Valley)</option>
+            <option value="accordion-5">Accordion (5 creases, alt M/V)</option>
+            <option value="single-vertical-mountain">Single Vertical (Mountain)</option>
+          </optgroup>
+          <optgroup label="Crane">
+            <option value="crane-demo">Crane (Demo, sequential masks)</option>
+            <option value="crane-fold">Crane (MIT FOLD import)</option>
+          </optgroup>
+        </select>
+      </label>
       <button id="btnApply">Apply</button>
-
-      <label for="foldFile" title="Load a .fold or .json (FOLD format)">Load FOLD</label>
-      <input id="foldFile" type="file" accept=".fold,.json" />
-
-      <button id="btnSnap" title="Download a PNG of the current frame">Save PNG</button>
-      <button id="btnAnim" title="Toggle animated folding">Animate: Off</button>
     </div>
 
-    <script type="module" src="./main.js"></script>
-    <noscript>This page needs JavaScript enabled.</noscript>
-  </body>
-</html>
+    <div class="row">
+      <label>
+        Fold Progress
+        <input id="progress" type="range" min="0" max="1" step="0.001" value="0.7" />
+      </label>
+      <button id="btnAnim">Play</button>
+      <button id="btnReset">Reset</button>
+      <button id="btnStepPrev">◀ Step</button>
+      <button id="btnStepNext">Step ▶</button>
+    </div>
 
+    <div class="row">
+      <label>
+        Speed
+        <input id="speed" type="range" min="0.05" max="3" step="0.01" value="0.9" />
+      </label>
+      <label>
+        Easing
+        <select id="easing">
+          <option value="linear">linear</option>
+          <option value="smoothstep" selected>smoothstep</option>
+          <option value="easeInOutCubic">easeInOutCubic</option>
+        </select>
+      </label>
+      <span id="stepInfo" class="muted">Step 1/1</span>
+    </div>
+
+    <div class="row">
+      <button id="btnSnap" title="Save current frame as PNG">Save PNG</button>
+      <label class="muted">Bloom is toned down by default (you can tweak in GUI)</label>
+    </div>
+  </div>
+
+  <script type="module" src="./main.js"></script>
+  <noscript>This page needs JavaScript enabled.</noscript>
+</body>
+</html>
