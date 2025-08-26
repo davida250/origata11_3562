@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Psychedelic Origami — Sequential Folding + Presets + FOLD</title>
+    <meta name="theme-color" content="#050509" />
+    <style>
+      html, body { height: 100%; margin: 0; background: #050509; }
+      #app { position: fixed; inset: 0; }
+
+      .brand {
+        position: fixed; left: 12px; top: 10px; color: #a6b1c2;
+        font: 12px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        user-select: none; opacity: 0.9;
+      }
+      @media (max-width: 560px) { .brand { display: none; } }
+
+      .hud {
+        position: fixed; left: 12px; bottom: 12px; z-index: 10;
+        display: flex; gap: 8px; flex-wrap: wrap; align-items: center;
+      }
+      .hud button, .hud select, .hud label {
+        padding: 8px 12px;
+        font: 12px/1.1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        background: #11131a; color: #e7f2ff; border: 1px solid #2a3244; border-radius: 6px;
+        cursor: pointer;
+      }
+      .hud button:hover, .hud select:hover, .hud label:hover { background: #151a22; }
+      #foldFile { display: none; }
+    </style>
+
+    <!-- Polyfill for older engines (safe to include) -->
+    <script async src="https://unpkg.com/es-module-shims@2.6.2/dist/es-module-shims.js"></script>
+
+    <!-- Import map (native ESM; no bundler needed) -->
+    <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.179.1/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.179.1/examples/jsm/",
+        "lil-gui": "https://cdn.jsdelivr.net/npm/lil-gui@0.20.0/dist/lil-gui.esm.js"
+      }
+    }
+    </script>
+
+    <!-- Optional: FOLD viewer/JS in case you later want helpers; not required to run -->
+    <script src="https://edemaine.github.io/fold/dist/fold.js"></script>
+  </head>
+  <body>
+    <div id="app"></div>
+    <div class="brand">Psychedelic Origami — drag to orbit, wheel to zoom</div>
+
+    <div class="hud">
+      <select id="preset">
+        <option value="random">Preset: Random (kinematic)</option>
+        <option value="pleats">Preset: Pleats</option>
+        <option value="waterbomb">Preset: Waterbomb Grid</option>
+        <option value="miura">Preset: Miura‑ori</option>
+        <option value="bird">Preset: Bird Base (crane base)</option>
+        <option value="crane">Preset: Crane (approx)</option>
+        <option value="radial">Preset: Radial Fan</option>
+        <option value="cross">Preset: Cross</option>
+        <option value="single">Preset: Single Crease</option>
+      </select>
+      <button id="btnApply">Apply</button>
+
+      <label for="foldFile" title="Load a .fold or .json (FOLD format)">Load FOLD</label>
+      <input id="foldFile" type="file" accept=".fold,.json" />
+
+      <button id="btnSnap" title="Download a PNG of the current frame">Save PNG</button>
+      <button id="btnAnim" title="Toggle animated folding">Animate: Off</button>
+    </div>
+
+    <script type="module" src="./main.js"></script>
+    <noscript>This page needs JavaScript enabled.</noscript>
+  </body>
+</html>
