@@ -1,18 +1,20 @@
 /**
  * Origami — Paper-Like Folds + Crane + Bird
  * - Rigid-hinge folds with sequential propagation (later creases move with the paper).
- * - Adds convex MASKS per crease to simulate regional folds (needed for crane/bird-like steps).
- * - Two Crane options:
- *   (A) "Crane (Demo)" — kinematic approximation with masks so it folds step-by-step.
- *   (B) "Crane (MIT FOLD)" — loads a solver-accurate crane (.fold) exported from
- *       origamisimulator.org (Examples → Crane (3D)/(flat) → File → Save Simulation as FOLD).
- * - Two Bird options:
- *   (A) "Flapping Bird (Demo)" — kinematic, sequential, masked.
- *   (B) "Flapping Bird (MIT FOLD)" — load ./bird.fold saved from the MIT app.
+ * - Convex MASKS per crease to localize folds (petal/reverse), enabling demo sequences.
+ * - Four presets:
+ *   (A) Crane (Demo)              — kinematic, sequential, masked.
+ *   (B) Crane (MIT FOLD import)   — load ./crane.fold (exported folded mesh).
+ *   (C) Flapping Bird (Demo)      — kinematic, sequential, masked.
+ *   (D) Flapping Bird (MIT FOLD)  — load ./bird.fold (exported folded mesh).
  *
- * Notes / references:
- * • MIT Origami Simulator folds all creases simultaneously via a GPU solver and exports FOLD/OBJ.
- * • FOLD format spec + viewer (vertices/edges/faces, assignments, fold angles).
+ * Mapping: a single global PROGRESS ∈ [0..1] traverses all creases in order.
+ *          0   = flat sheet, 0.5 = halfway through all steps, 1 = fully folded.
+ *
+ * References:
+ * • MIT Origami Simulator: folds all creases simultaneously via a GPU solver; exports FOLD/OBJ/STL of folded states. :contentReference[oaicite:3]{index=3}
+ * • FOLD file format (vertices/edges/faces, assignments). :contentReference[oaicite:4]{index=4}
+ * • Angle convention: dihedral angles are positive for valley folds, negative for mountain folds. :contentReference[oaicite:5]{index=5}
  */
 
 import * as THREE from 'three';
@@ -46,7 +48,7 @@ controls.enableDamping = true;
 // ---------- Post ----------
 const composer = new EffectComposer(renderer);
 composer.addPass(new RenderPass(scene, camera));
-// Lower default bloom strength
+// Lower default bloom strength a bit
 const bloom = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.35, 0.6, 0.2);
 composer.addPass(bloom);
 const fxaa = new ShaderPass(FXAAShader);
@@ -55,7 +57,7 @@ composer.addPass(fxaa);
 composer.addPass(new OutputPass());
 
 // ---------- Paper geometry ----------
-const SIZE = 3.0;                  // square paper for crane/bird
+const SIZE = 3.0;                  // square paper for crane/bird demos
 const SEG = 180;                   // dense → crisp hinges
 const geo = new THREE.PlaneGeometry(SIZE, SIZE, SEG, SEG);
 geo.rotateX(-0.25);                // tilt
@@ -95,13 +97,12 @@ const base = {
   mCount: new Array(MAX_CREASES).fill(0),
   mA:  Array.from({ length: MAX_CREASES }, () => Array.from({ length: MAX_MASKS_PER }, () => new THREE.Vector3())),
   mD:  Array.from({ length: MAX_CREASES }, () => Array.from({ length: MAX_MASKS_PER }, () => new THREE.Vector3(1,0,0))),
-  phase:new Array(MAX_CREASES).fill(0)       // per-crease anim phase
 };
 function resetBase(){
   base.count = 0;
   for (let i=0;i<MAX_CREASES;i++){
     base.A[i].set(0,0,0); base.D[i].set(1,0,0);
-    base.amp[i]=0; base.sign[i]=1; base.phase[i]=0; base.mCount[i]=0;
+    base.amp[i]=0; base.sign[i]=1; base.mCount[i]=0;
     for (let m=0;m<MAX_MASKS_PER;m++){ base.mA[i][m].set(0,0,0); base.mD[i][m].set(1,0,0); }
   }
 }
@@ -113,7 +114,6 @@ function addCrease({ Ax=0, Ay=0, Dx=1, Dy=0, deg=180, sign=+1, masks=[] }){
   base.D[i].set(d.x, d.y, 0);
   base.amp[i]  = THREE.MathUtils.degToRad(Math.max(0, Math.min(180, Math.abs(deg))));
   base.sign[i] = sign >= 0 ? +1 : -1;
-  base.phase[i]= Math.random()*Math.PI*2;
   base.mCount[i] = Math.min(MAX_MASKS_PER, masks.length);
   for (let m=0;m<base.mCount[i];m++){
     const mk = masks[m];
@@ -133,28 +133,26 @@ const eff = {
   mD:  Array.from({ length: MAX_CREASES }, () => Array.from({ length: MAX_MASKS_PER }, () => new THREE.Vector3(1,0,0))),
 };
 
-// ---------- Drive + HUD Auto oscillation ----------
-const drive = { animate:false, speed:0.9, progress:0.7, easing:'smoothstep', currentStep:0, stepCount:1 };
-
-const auto = {
-  progress: { enabled:false, dir:+1, rate:0.8 }, // units/sec across [0..1]
-  speed:    { enabled:false, dir:+1, rate:0.5 }  // units/sec across [min..max]
+// ---------- Drive (global) ----------
+const drive = {
+  animate:false,   // ping-pong 0↔1
+  speed:0.25,      // progress units per second
+  progress:0.0,    // global progress across all folds
+  easing:'smoothstep',
+  dir:+1,
+  stepCount:1
 };
-let _lastT = 0;
 
-function clamp(v, lo, hi){ return Math.max(lo, Math.min(hi, v)); }
-
-// angles per crease, respecting step boundaries
+// Map global progress → per-crease angles, *sequentially*.
+// If N creases, local progress for crease i is clamp(N*p - i, 0..1).
 function computeAngles(tSec){
   const E = Easings[drive.easing] || Easings.linear;
+  const N = Math.max(1, base.count);
+  const p = clamp01(drive.progress);
   for (let i=0;i<base.count;i++){
-    // piecewise step easing: only fold up to current step; earlier steps stay at 1
-    let localT = 0;
-    if (i < drive.currentStep) localT = 1;
-    else if (i === drive.currentStep) localT = drive.animate ? (0.5 + 0.5*Math.sin(tSec*drive.speed + base.phase[i])) : drive.progress;
-    else localT = 0;
-    localT = E(clamp01(localT));
-    eff.ang[i] = base.sign[i] * base.amp[i] * localT;
+    const segT = Math.max(0, Math.min(1, N*p - i)); // 0..1 window per crease
+    const localT = E(segT);
+    eff.ang[i]    = base.sign[i] * base.amp[i] * localT;
     eff.mCount[i] = base.mCount[i];
   }
 }
@@ -228,7 +226,6 @@ function pushEffToUniforms(){
       on.push(m < eff.mCount[i] ? 1 : 0);
     }
   }
-  // pad remainder
   const remain = MAX_CREASES*MAX_MASKS_PER - flatA.length;
   for (let r=0;r<remain;r++){ flatA.push(new THREE.Vector3()); flatD.push(new THREE.Vector3(1,0,0)); on.push(0); }
   uniforms.uMaskA.value = flatA;
@@ -267,13 +264,11 @@ const vs = /* glsl */`
     return d.x*(p.y - a.y) - d.y*(p.x - a.x);
   }
   bool inMask(int i, vec2 p){
-    // each crease uses MAX_MASKS_PER entries, active if uMaskOn[idx] > 0.5
     for (int m=0; m<MAX_MASKS_PER; m++){
       int idx = i*MAX_MASKS_PER + m;
       if (uMaskOn[idx] > 0.5) {
         vec2 a = uMaskA[idx].xy;
         vec2 d = normalize(uMaskD[idx].xy);
-        // inside means on positive side of every half-plane
         float sd = d.x*(p.y - a.y) - d.y*(p.x - a.x);
         if (sd <= 0.0) return false;
       }
@@ -292,7 +287,6 @@ const vs = /* glsl */`
       vec3 a = uAeff[i];
       vec3 d = normalize(uDeff[i]);
 
-      // crisp hinge on positive side, AND inside mask (if any)
       float sd = signedDistanceToLine(p.xy, a.xy, d.xy);
       if (sd > 0.0 && inMask(i, p.xy)){
         p = rotateAroundLine(p, a, d, uAng[i]);
@@ -347,7 +341,6 @@ const fs = /* glsl */`
   }
 
   void main(){
-    // psychedelic kaleidoscope, unchanged look
     float theta = atan(vPos.z, vPos.x);
     float r = length(vPos.xz) * 0.55;
     float seg = 2.0*PI / max(3.0, uSectors);
@@ -360,7 +353,6 @@ const fs = /* glsl */`
     float hue = fract(n + 0.15*sin(uTime*0.3) + uHueShift);
     vec3 baseCol = hsv2rgb(vec3(hue, 0.9, smoothstep(0.25, 1.0, n)));
 
-    // paper fiber + grain
     float fiberLines = 0.0;
     {
       float warp = fbm(vLocal.xy*4.0 + vec2(0.2*uTime, -0.1*uTime));
@@ -371,7 +363,6 @@ const fs = /* glsl */`
     float grain = fbm(vLocal.xy*25.0);
     baseCol *= 1.0 + uFiber*(0.06*grain - 0.03) + uFiber*0.08*fiberLines;
 
-    // crease glow
     float minD = 1e9;
     for (int i=0; i<MAX_CREASES; i++){
       if (i >= uCreaseCount) break;
@@ -383,7 +374,6 @@ const fs = /* glsl */`
     float aa = fwidth(minD);
     float edge = 1.0 - smoothstep(0.0025, 0.0025 + aa, minD);
 
-    // iridescence
     vec3 V = normalize(cameraPosition - vPos);
     vec3 N = normalize(vN);
     float cosT = clamp(dot(N, V), 0.0, 1.0);
@@ -411,56 +401,58 @@ scene.add(new THREE.Mesh(
   new THREE.MeshBasicMaterial({ color: 0x070711, side: THREE.BackSide })
 ));
 
-// ---------- GUI (optional look tweaks) ----------
+// ---------- GUI: Look controls + Auto oscillators ----------
 const gui = new GUI();
-const looks = gui.addFolder('Look');
-looks.add(uniforms.uSectors, 'value', 3, 24, 1).name('kaleidoSectors');
-looks.add(uniforms.uHueShift, 'value', 0, 1, 0.001).name('hueShift');
-looks.add(uniforms.uIridescence, 'value', 0, 1, 0.001).name('iridescence');
-looks.add(uniforms.uFilmIOR, 'value', 1.0, 2.333, 0.001).name('filmIOR');
-looks.add(uniforms.uFilmNm, 'value', 100, 800, 1).name('filmThickness(nm)');
-looks.add(uniforms.uFiber, 'value', 0, 1, 0.001).name('paperFiber');
-looks.add(uniforms.uEdgeGlow, 'value', 0.0, 2.0, 0.01).name('edgeGlow');
-looks.add(bloom, 'strength', 0.0, 2.5, 0.01).name('bloomStrength');  // starts at 0.35
-looks.add(bloom, 'radius', 0.0, 1.5, 0.01).name('bloomRadius');
-looks.open();
+const looks  = gui.addFolder('Look');
 
-// ---------- Presets (simple, paper-like) ----------
-const VALLEY = +1, MOUNTAIN = -1;
-
-function preset_half_vertical_valley(){
-  resetBase();
-  addCrease({ Ax:0, Ay:0, Dx:0, Dy:1, deg:180, sign:VALLEY });
+// Helper to attach an Auto (triangle-wave) oscillator that updates GUI in real time
+const autos  = []; // { get,set,min,max,rate,dir,on,ctrl,label,integer }
+function registerAuto(ctrl, label, get, set, min, max, { integer=false, rate=null }={}){
+  const range = max - min;
+  const entry = { get, set, min, max, integer, dir:+1, rate: (rate ?? range/6), ctrl, on:false, label };
+  const autoState = { Auto:false };
+  const autoCtrl  = looks.add(autoState, 'Auto').name(label + ' Auto');
+  autoCtrl.onChange(v => entry.on = !!v);
+  autos.push(entry);
+  return entry;
 }
-function preset_half_horizontal_valley(){
-  resetBase();
-  addCrease({ Ax:0, Ay:0, Dx:1, Dy:0, deg:180, sign:VALLEY });
-}
-function preset_diagonal_valley(){
-  resetBase();
-  addCrease({ Ax:0, Ay:0, Dx:1, Dy:1, deg:180, sign:VALLEY });
-}
-function preset_gate_valley(){
-  resetBase();
-  const x = SIZE*0.25;
-  addCrease({ Ax:+x, Ay:0, Dx:0, Dy:1, deg:180, sign:VALLEY });
-  addCrease({ Ax:-x, Ay:0, Dx:0, Dy:1, deg:180, sign:VALLEY });
-}
-function preset_accordion_5(){
-  resetBase();
-  const n = 5;
-  for (let i=1;i<=n;i++){
-    const x = THREE.MathUtils.lerp(-SIZE/2, SIZE/2, i/(n+1));
-    const sign = (i % 2 === 1) ? VALLEY : MOUNTAIN;
-    addCrease({ Ax:x, Ay:0, Dx:0, Dy:1, deg:180, sign });
+function updateLookAutos(dt){
+  for (const a of autos){
+    if (!a.on) continue;
+    let v = a.get() + a.dir * a.rate * dt;
+    if (v >= a.max){ v = a.max; a.dir = -1; }
+    if (v <= a.min){ v = a.min; a.dir = +1; }
+    if (a.integer) v = Math.round(v);
+    a.set(v);
+    a.ctrl.updateDisplay(); // live UI movement
   }
 }
-function preset_single_vertical_mountain(){
-  resetBase();
-  addCrease({ Ax:0, Ay:0, Dx:0, Dy:1, deg:180, sign:MOUNTAIN });
-}
 
-// ---------- Crane (Demo) — sequential masked folds ----------
+// Sliders + Auto toggles (every Look slider has an Auto)
+const cSectors = looks.add(uniforms.uSectors, 'value', 3, 24, 1).name('kaleidoSectors');
+registerAuto(cSectors, 'kaleidoSectors', () => uniforms.uSectors.value, v => uniforms.uSectors.value = v, 3, 24, { integer:true });
+const cHue     = looks.add(uniforms.uHueShift, 'value', 0, 1, 0.001).name('hueShift');
+registerAuto(cHue, 'hueShift', () => uniforms.uHueShift.value, v => uniforms.uHueShift.value = v, 0, 1, {});
+const cIri     = looks.add(uniforms.uIridescence, 'value', 0, 1, 0.001).name('iridescence');
+registerAuto(cIri, 'iridescence', () => uniforms.uIridescence.value, v => uniforms.uIridescence.value = v, 0, 1, {});
+const cIOR     = looks.add(uniforms.uFilmIOR, 'value', 1.0, 2.333, 0.001).name('filmIOR');
+registerAuto(cIOR, 'filmIOR', () => uniforms.uFilmIOR.value, v => uniforms.uFilmIOR.value = v, 1.0, 2.333, {});
+const cNm      = looks.add(uniforms.uFilmNm, 'value', 100, 800, 1).name('filmThickness(nm)');
+registerAuto(cNm, 'filmThickness(nm)', () => uniforms.uFilmNm.value, v => uniforms.uFilmNm.value = v, 100, 800, {});
+const cFiber   = looks.add(uniforms.uFiber, 'value', 0, 1, 0.001).name('paperFiber');
+registerAuto(cFiber, 'paperFiber', () => uniforms.uFiber.value, v => uniforms.uFiber.value = v, 0, 1, {});
+const cEdge    = looks.add(uniforms.uEdgeGlow, 'value', 0.0, 2.0, 0.01).name('edgeGlow');
+registerAuto(cEdge, 'edgeGlow', () => uniforms.uEdgeGlow.value, v => uniforms.uEdgeGlow.value = v, 0.0, 2.0, {});
+const cBloomS  = looks.add(bloom, 'strength', 0.0, 2.5, 0.01).name('bloomStrength');
+registerAuto(cBloomS, 'bloomStrength', () => bloom.strength, v => (bloom.strength = v), 0.0, 2.5, {});
+const cBloomR  = looks.add(bloom, 'radius', 0.0, 1.5, 0.01).name('bloomRadius');
+registerAuto(cBloomR, 'bloomRadius', () => bloom.radius, v => (bloom.radius = v), 0.0, 1.5, {});
+looks.open();
+
+// ---------- Presets (only 4) ----------
+const VALLEY = +1, MOUNTAIN = -1;
+
+// Crane (Demo) — sequential masked folds (kinematic approximation)
 function preset_crane_demo(){
   resetBase();
   const s = SIZE/2;
@@ -474,10 +466,10 @@ function preset_crane_demo(){
   // Step 2: central vertical valley — masked top half (start neck/tail split)
   addCrease({
     Ax:0, Ay:0, Dx:0, Dy:1, deg:150, sign:VALLEY,
-    masks:[ // diamond-ish mask: top region
-      { Ax:0, Ay:0.00, Dx:0, Dy:1 },   // above y=0
-      { Ax:-0.0001, Ay:-0.0001, Dx: 1, Dy: 1 },  // right of diag
-      { Ax: 0.0001, Ay:-0.0001, Dx:-1, Dy: 1 },  // left of anti-diag
+    masks:[
+      { Ax:0, Ay:0.00, Dx:0, Dy:1 },
+      { Ax:-0.0001, Ay:-0.0001, Dx: 1, Dy: 1 },
+      { Ax: 0.0001, Ay:-0.0001, Dx:-1, Dy: 1 },
     ]
   });
 
@@ -485,7 +477,7 @@ function preset_crane_demo(){
   addCrease({
     Ax:0, Ay:0, Dx:0, Dy:1, deg:150, sign:MOUNTAIN,
     masks:[
-      { Ax:0, Ay:0.00, Dx:0, Dy:-1 },  // below y=0
+      { Ax:0, Ay:0.00, Dx:0, Dy:-1 },
       { Ax:-0.0001, Ay: 0.0001, Dx: 1, Dy:-1 },
       { Ax: 0.0001, Ay: 0.0001, Dx:-1, Dy:-1 },
     ]
@@ -494,53 +486,37 @@ function preset_crane_demo(){
   // Step 4: wing right — diagonal valley masked right triangle
   addCrease({
     Ax:0, Ay:0, Dx:1, Dy:-1, deg:120, sign:VALLEY,
-    masks:[
-      { Ax:0, Ay:0, Dx:0, Dy:1 },     // y>0
-      { Ax:0, Ay:0, Dx:1, Dy:0 },     // x>0
-    ]
+    masks:[ { Ax:0, Ay:0, Dx:0, Dy:1 }, { Ax:0, Ay:0, Dx:1, Dy:0 } ]
   });
 
   // Step 5: wing left — diagonal valley masked left triangle
   addCrease({
     Ax:0, Ay:0, Dx:1, Dy:1, deg:120, sign:VALLEY,
-    masks:[
-      { Ax:0, Ay:0, Dx:0, Dy:1 },     // y>0
-      { Ax:0, Ay:0, Dx:-1, Dy:0 },    // x<0
-    ]
+    masks:[ { Ax:0, Ay:0, Dx:0, Dy:1 }, { Ax:0, Ay:0, Dx:-1, Dy:0 } ]
   });
 
-  // Step 6: tail inside-reverse (approx) — steep diagonal with small mask
+  // Step 6: tail inside-reverse (approx)
   addCrease({
     Ax:0.0, Ay:-0.3*s, Dx:1, Dy:-0.15, deg:140, sign:VALLEY,
-    masks:[
-      { Ax:0, Ay:-0.1, Dx:0, Dy:-1 }, // below slightly negative y
-      { Ax: 0.0, Ay:0.0, Dx:1, Dy:0 }, // x>0
-    ]
+    masks:[ { Ax:0, Ay:-0.1, Dx:0, Dy:-1 }, { Ax: 0.0, Ay:0.0, Dx:1, Dy:0 } ]
   });
 
-  // Step 7: neck inside-reverse (approx) — mirror of tail
+  // Step 7: neck inside-reverse (approx)
   addCrease({
     Ax:0.0, Ay:-0.3*s, Dx:-1, Dy:-0.15, deg:140, sign:VALLEY,
-    masks:[
-      { Ax:0, Ay:-0.1, Dx:0, Dy:-1 }, // below slightly negative y
-      { Ax: 0.0, Ay:0.0, Dx:-1, Dy:0 }, // x<0
-    ]
+    masks:[ { Ax:0, Ay:-0.1, Dx:0, Dy:-1 }, { Ax: 0.0, Ay:0.0, Dx:-1, Dy:0 } ]
   });
 
   // Step 8: head — small mountain
   addCrease({
     Ax:-0.45*s, Ay:-0.65*s, Dx:1, Dy:-0.2, deg:90, sign:MOUNTAIN,
-    masks:[
-      { Ax:-0.1, Ay:-0.2, Dx:-1, Dy:-1 },
-      { Ax:-0.2, Ay:-0.2, Dx:-1, Dy: 0 },
-    ]
+    masks:[ { Ax:-0.1, Ay:-0.2, Dx:-1, Dy:-1 }, { Ax:-0.2, Ay:-0.2, Dx:-1, Dy: 0 } ]
   });
 
-  drive.currentStep = 0;
   drive.stepCount = base.count;
 }
 
-// ---------- Flapping Bird (Demo) — sequential masked folds ----------
+// Flapping Bird (Demo) — sequential masked folds
 function preset_bird_demo(){
   resetBase();
   const s = SIZE/2;
@@ -559,7 +535,7 @@ function preset_bird_demo(){
     masks:[ { Ax:0, Ay:0, Dx:0, Dy:-1 }, { Ax:-0.0001, Ay: 0.0001, Dx: 1, Dy:-1 }, { Ax:0.0001, Ay:0.0001, Dx:-1, Dy:-1 } ]
   });
 
-  // Step 4–5: fold wings downward (top-left / top-right)
+  // Step 4–5: wings downward
   addCrease({
     Ax:0, Ay:0, Dx:1, Dy: 1, deg:120, sign:VALLEY,
     masks:[ { Ax:0, Ay:0, Dx:0, Dy:1 }, { Ax:0, Ay:0, Dx:-1, Dy:0 } ] // y>0 & x<0
@@ -569,18 +545,18 @@ function preset_bird_demo(){
     masks:[ { Ax:0, Ay:0, Dx:0, Dy:1 }, { Ax:0, Ay:0, Dx: 1, Dy:0 } ] // y>0 & x>0
   });
 
-  // Step 6: small head (mountain) on left flap end
+  // Step 6: head (mountain)
   addCrease({
     Ax:-0.45*s, Ay:-0.62*s, Dx:1, Dy:-0.2, deg:85, sign:MOUNTAIN,
     masks:[ { Ax:-0.1, Ay:-0.2, Dx:-1, Dy:-1 }, { Ax:-0.2, Ay:-0.2, Dx:-1, Dy: 0 } ]
   });
 
-  drive.currentStep = 0;
   drive.stepCount = base.count;
 }
 
-// ---------- Crane (MIT FOLD) loader ----------
-let craneMesh = null;
+// ---------- FOLD loaders (MIT exports) ----------
+let craneMesh = null, birdMesh = null;
+
 async function tryLoadCraneFOLD(){
   try{
     const res = await fetch('./crane.fold');
@@ -592,7 +568,6 @@ async function tryLoadCraneFOLD(){
     if (!verts.length || !faces.length) throw new Error('invalid FOLD');
 
     const g = new THREE.BufferGeometry();
-    // naive fan triangulation in case faces aren't triangulated
     const pos = [];
     for (const f of faces){
       if (f.length < 3) continue;
@@ -600,8 +575,7 @@ async function tryLoadCraneFOLD(){
         const tri = [f[0], f[i], f[i+1]];
         for (const vi of tri){
           const v = verts[vi];
-          const x = v[0], y = v[1], z = (v.length>2? v[2]: 0);
-          pos.push(x, y, z);
+          pos.push(v[0], v[1], (v.length>2? v[2]: 0));
         }
       }
     }
@@ -616,7 +590,7 @@ async function tryLoadCraneFOLD(){
     craneMesh = mesh;
     craneMesh.position.set(0, 0, 0.001); // avoid z-fight
     scene.add(craneMesh);
-    sheet.visible = false; // hide folding sheet; viewing solver result
+    sheet.visible = false; // viewing solver result
     return true;
   }catch(e){
     if (craneMesh){ scene.remove(craneMesh); craneMesh = null; }
@@ -625,8 +599,6 @@ async function tryLoadCraneFOLD(){
   }
 }
 
-// ---------- Flapping Bird (MIT FOLD) loader ----------
-let birdMesh = null;
 async function tryLoadBirdFOLD(){
   try{
     const res = await fetch('./bird.fold');
@@ -677,10 +649,12 @@ const btnNext   = document.getElementById('btnStepNext');
 const btnSnap   = document.getElementById('btnSnap');
 const progress  = document.getElementById('progress');
 const speed     = document.getElementById('speed');
-const autoProgressChk = document.getElementById('autoProgress');
-const autoSpeedChk    = document.getElementById('autoSpeed');
 const easingSel = document.getElementById('easing');
 const stepInfo  = document.getElementById('stepInfo');
+
+function setProgress(p){ drive.progress = clamp01(p); progress.value = String(drive.progress.toFixed(3)); }
+function stepFromProgress(){ const N = Math.max(1, drive.stepCount); return Math.min(N, Math.floor(N*drive.progress) + 1); }
+function updateStepInfo(){ stepInfo.textContent = `Step ${stepFromProgress()}/${drive.stepCount}`; }
 
 btnApply.onclick = async () => {
   const v = presetSel.value;
@@ -692,8 +666,8 @@ btnApply.onclick = async () => {
 `Place a solver-exported FOLD file at:
   ./crane.fold
 
-Get one from origamisimulator.org:
-  Examples → Crane (3D) or Crane (flat)
+Get one from the MIT Origami Simulator:
+  Examples → Crane
   File → Save Simulation as… → FOLD
 (Then refresh.)`
       );
@@ -709,7 +683,7 @@ Get one from origamisimulator.org:
 `Place a solver-exported FOLD file at:
   ./bird.fold
 
-Get one from origamisimulator.org:
+Get one from the MIT Origami Simulator:
   Examples → Flapping Bird
   File → Save Simulation as… → FOLD
 (Then refresh.)`
@@ -724,18 +698,11 @@ Get one from origamisimulator.org:
   if (craneMesh){ scene.remove(craneMesh); craneMesh = null; }
   if (birdMesh){ scene.remove(birdMesh); birdMesh = null; }
 
-  if (v === 'half-vertical-valley') preset_half_vertical_valley();
-  else if (v === 'half-horizontal-valley') preset_half_horizontal_valley();
-  else if (v === 'diagonal-valley') preset_diagonal_valley();
-  else if (v === 'gate-valley') preset_gate_valley();
-  else if (v === 'accordion-5') preset_accordion_5();
-  else if (v === 'single-vertical-mountain') preset_single_vertical_mountain();
-  else if (v === 'crane-demo') preset_crane_demo();
-  else if (v === 'bird-demo') preset_bird_demo();
+  if (v === 'crane-demo')      preset_crane_demo();
+  else if (v === 'bird-demo')  preset_bird_demo();
 
-  drive.currentStep = 0;
   drive.stepCount = base.count || 1;
-  updateStepInfo();
+  setProgress(0.0); updateStepInfo();
   camera.position.x += (Math.random()-0.5) * 0.03;
   camera.position.y += (Math.random()-0.5) * 0.03;
 };
@@ -747,32 +714,23 @@ btnAnim.onclick = () => {
 };
 btnReset.onclick = () => {
   drive.animate = false; btnAnim.textContent = 'Play';
-  drive.progress = 0; progress.value = '0';
-  drive.currentStep = 0; updateStepInfo();
+  setProgress(0.0); updateStepInfo();
 };
 btnPrev.onclick = () => {
-  if (drive.currentStep > 0) drive.currentStep--;
+  const N = Math.max(1, drive.stepCount);
+  const k = Math.floor(N*drive.progress);
+  setProgress((Math.max(0, k-1))/N);
   updateStepInfo();
 };
 btnNext.onclick = () => {
-  if (drive.currentStep < drive.stepCount - 1) drive.currentStep++;
+  const N = Math.max(1, drive.stepCount);
+  const k = Math.floor(N*drive.progress);
+  setProgress((Math.min(N, k+1))/N);
   updateStepInfo();
 };
-function updateStepInfo(){
-  stepInfo.textContent = `Step ${Math.min(drive.currentStep+1, drive.stepCount)}/${drive.stepCount}`;
-}
-progress.addEventListener('input', () => { drive.progress = parseFloat(progress.value); });
-speed.addEventListener('input', () => { drive.speed = parseFloat(speed.value); });
+progress.addEventListener('input', () => { setProgress(parseFloat(progress.value)); updateStepInfo(); });
+speed.addEventListener('input',   () => { drive.speed   = parseFloat(speed.value); });
 easingSel.addEventListener('change', () => { drive.easing = easingSel.value; });
-
-// Auto oscillators: toggle + ensure "Play" doesn't fight with Auto Progress
-autoProgressChk && autoProgressChk.addEventListener('change', () => {
-  auto.progress.enabled = !!autoProgressChk.checked;
-  if (auto.progress.enabled){ drive.animate = false; btnAnim.textContent = 'Play'; }
-});
-autoSpeedChk && autoSpeedChk.addEventListener('change', () => {
-  auto.speed.enabled = !!autoSpeedChk.checked;
-});
 
 btnSnap.onclick = () => {
   renderer.domElement.toBlob((blob) => {
@@ -795,34 +753,26 @@ function updateFolding(tSec){
   computeEffectiveFrames();
   pushEffToUniforms();
 }
-function updateAutos(tSec){
-  if (!_lastT) _lastT = tSec;
-  const dt = clamp(tSec - _lastT, 0, 0.1); // clamp to avoid jumps
-  _lastT = tSec;
-
-  // Progress ∈ [0,1]
-  if (auto.progress.enabled){
-    let v = drive.progress + auto.progress.dir * auto.progress.rate * dt;
-    if (v >= 1){ v = 1; auto.progress.dir = -1; }
-    if (v <= 0){ v = 0; auto.progress.dir = +1; }
-    drive.progress = v;
-    if (progress) progress.value = v.toFixed(3);
-  }
-  // Speed ∈ [min,max]
-  if (auto.speed.enabled && speed){
-    const lo = parseFloat(speed.min || '0.05');
-    const hi = parseFloat(speed.max || '3');
-    let v = drive.speed + auto.speed.dir * auto.speed.rate * dt;
-    if (v >= hi){ v = hi; auto.speed.dir = -1; }
-    if (v <= lo){ v = lo; auto.speed.dir = +1; }
-    drive.speed = v;
-    speed.value = v.toFixed(2);
-  }
+function updateProgressAuto(dt){
+  if (!drive.animate) return;
+  let p = drive.progress + drive.dir * drive.speed * dt;
+  if (p >= 1){ p = 1; drive.dir = -1; }
+  if (p <= 0){ p = 0; drive.dir = +1; }
+  setProgress(p);
 }
 function tick(t){
   const tSec = t * 0.001;
   uniforms.uTime.value = tSec;
-  updateAutos(tSec);
+
+  // delta time
+  if (!tick._prev) tick._prev = tSec;
+  const dt = Math.min(0.1, Math.max(0, tSec - tick._prev)); tick._prev = tSec;
+
+  // autos
+  updateProgressAuto(dt);
+  updateLookAutos(dt);
+
+  // folding + render
   updateFolding(tSec);
   controls.update();
   composer.render();
@@ -838,5 +788,6 @@ window.addEventListener('resize', () => {
   fxaa.material.uniforms.resolution.value.set(1 / w, 1 / h);
 });
 
-// ---------- Helpers for sign convention ----------
-// We follow MIT/Ghassaei conventions: valley = +°, mountain = −°.
+// ---------- Conventions ----------
+// We follow the common sign convention used in the literature and MIT’s simulator:
+// valley = +°, mountain = −°. :contentReference[oaicite:6]{index=6}
