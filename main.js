@@ -1,14 +1,15 @@
 /**
- * Origami — Rigid‑Hinge Folding with Crisp Creases
- * - Global progress ∈ [0..1] maps sequentially across all creases.
- * - Speed slider is a multiplier for *all* auto motion (Play + Look/Auto):
- *     left=×0.2 (5× slower), mid=×1, right=×5 (5× faster).
- * - Presets: Book Fold, Gate Fold, Crane (Demo). No FOLD imports.
- * - More paper‑realistic: geometry is cut along every crease line so triangles
- *   never straddle a crease → crisp hinges, piecewise‑planar panels.
+ * Origami — Rigid‑Hinge Folding with UV‑space Textures (Kaleido / Perlin / Fractal)
+ * - Global progress ∈ [0..1] maps across a fold timeline (creases can overlap in time).
+ * - Speed slider is a multiplier for *all* auto motion (Play + Look/Auto).
+ * - Presets: Book Fold, Gate Fold, Crane (Demo). No file loads.
+ * - Textures in **UV space** (not world) so patterns stay glued to the paper as it folds.
+ * - Texture Type: Kaleido (UV), Perlin/FBM, Fractal (Julia); Texture Scale has an **Auto**.
+ * - Mesh is cut along every crease line → crisp hinges, planar panels.
  *
- * Notes:
- * • MIT’s simulator folds *all* creases simultaneously via a GPU solver on a triangulated mesh; we keep a sequential driver but align with the same rigid, piecewise‑planar view (creases as edges). :contentReference[oaicite:3]{index=3}
+ * If you want *exact* paper‑like behavior for arbitrary crease patterns,
+ * you need a constraint/energy solver that enforces isometry + dihedral constraints,
+ * e.g., the MIT Origami Simulator’s GPU method with FOLD geometry. 
  */
 
 import * as THREE from 'three';
@@ -52,6 +53,7 @@ composer.addPass(new OutputPass());
 // ---------- Parameters ----------
 const SIZE = 3.0;            // square sheet edge length
 const BASE_SEG = 48;         // base grid before cutting along creases
+const VALLEY = +1, MOUNTAIN = -1;
 
 // ---------- Math helpers ----------
 const tmp = { v: new THREE.Vector3(), u: new THREE.Vector3() };
@@ -72,10 +74,9 @@ const Easings = {
   easeInOutCubic: t => (t<0.5? 4*t*t*t : 1 - Math.pow(-2*t+2,3)/2)
 };
 
-// ---------- Creases + MASKS ----------
-const MAX_CREASES = 24;
+// ---------- Creases + MASKS + Timeline ----------
+const MAX_CREASES = 48;
 const MAX_MASKS_PER = 4;
-const VALLEY = +1, MOUNTAIN = -1;
 
 const base = {
   count: 0,
@@ -86,16 +87,20 @@ const base = {
   mCount: new Array(MAX_CREASES).fill(0),
   mA:  Array.from({ length: MAX_CREASES }, () => Array.from({ length: MAX_MASKS_PER }, () => new THREE.Vector3())),
   mD:  Array.from({ length: MAX_CREASES }, () => Array.from({ length: MAX_MASKS_PER }, () => new THREE.Vector3(1,0,0))),
+  // fold timeline per crease; if t0[i]<0 → sequential default i/N..(i+1)/N
+  t0:  new Array(MAX_CREASES).fill(-1),
+  t1:  new Array(MAX_CREASES).fill(-1)
 };
 function resetBase(){
   base.count = 0;
   for (let i=0;i<MAX_CREASES;i++){
     base.A[i].set(0,0,0); base.D[i].set(1,0,0);
     base.amp[i]=0; base.sign[i]=1; base.mCount[i]=0;
+    base.t0[i] = -1; base.t1[i] = -1;
     for (let m=0;m<MAX_MASKS_PER;m++){ base.mA[i][m].set(0,0,0); base.mD[i][m].set(1,0,0); }
   }
 }
-function addCrease({ Ax=0, Ay=0, Dx=1, Dy=0, deg=180, sign=+1, masks=[] }){
+function addCrease({ Ax=0, Ay=0, Dx=1, Dy=0, deg=180, sign=+1, masks=[], t0=-1, t1=-1 }){
   if (base.count >= MAX_CREASES) return;
   const i = base.count++;
   const d = new THREE.Vector2(Dx, Dy).normalize();
@@ -110,6 +115,7 @@ function addCrease({ Ax=0, Ay=0, Dx=1, Dy=0, deg=180, sign=+1, masks=[] }){
     base.mA[i][m].set(mk.Ax, mk.Ay, 0);
     base.mD[i][m].set(dd.x, dd.y, 0);
   }
+  base.t0[i] = t0; base.t1[i] = t1;
 }
 
 // ---------- Effective axes + masks (sequential propagation) ----------
@@ -126,25 +132,45 @@ const eff = {
 const drive = {
   animate:false,       // ping-pong 0↔1
   baseSpeed:0.25,      // progress units per second *before* multiplier
-  progress:0.0,        // global progress across all folds
+  progress:0.0,        // global progress across timeline
   easing:'smoothstep',
   dir:+1,
-  stepCount:1
+  stepCount:1,
+  checkpoints:[0,1]
 };
 function speedMultiplierFromSlider(x01){
   // map [0..1] → [1/5 .. 5], mid=1 (exponential for symmetric perception)
   return Math.pow(5, (x01 - 0.5) * 2.0);
 }
 
-// Map global progress → per-crease angles, *sequentially*.
-// If N creases, local progress for crease i is clamp(N*p - i, 0..1).
+// Build checkpoints from unique t0s (+0 and 1) for Step Prev/Next UI
+function rebuildCheckpoints(){
+  const pts = new Set([0,1]);
+  for (let i=0;i<base.count;i++){
+    if (base.t0[i] >= 0) pts.add(clamp01(base.t0[i]));
+  }
+  const arr = Array.from(pts).sort((a,b)=>a-b);
+  drive.checkpoints = arr;
+  drive.stepCount = arr.length - 1;
+}
+
+// Map global progress → per-crease angles along timeline.
+// If t0<0, default segment is i/N..(i+1)/N.
 function computeAngles(){
   const E = Easings[drive.easing] || Easings.linear;
   const N = Math.max(1, base.count);
   const p = clamp01(drive.progress);
   for (let i=0;i<base.count;i++){
-    const segT = clamp01(N*p - i); // 0..1 window per crease
-    const localT = E(segT);
+    const t0 = (base.t0[i] >= 0 ? base.t0[i] : (i/N));
+    const t1 = (base.t1[i] >= 0 ? base.t1[i] : ((i+1)/N));
+    let localT = 0.0;
+    if (p <= t0) localT = 0.0;
+    else if (p >= t1) localT = 1.0;
+    else {
+      const u = (p - t0) / Math.max(1e-6, (t1 - t0));
+      localT = clamp01(u);
+    }
+    localT = E(localT);
     eff.ang[i]    = base.sign[i] * base.amp[i] * localT;
     eff.mCount[i] = base.mCount[i];
   }
@@ -229,10 +255,8 @@ const vs = /* glsl */`
 
     for (int i=0; i<MAX_CREASES; i++){
       if (i >= uCreaseCount) break;
-
       vec3 a = uAeff[i];
       vec3 d = normalize(uDeff[i]);
-
       float sd = signedDistanceToLine(p.xy, a.xy, d.xy);
       if (sd > 0.0 && inMask(i, p.xy)){
         p = rotateAroundLine(p, a, d, uAng[i]);
@@ -252,11 +276,18 @@ const fs = /* glsl */`
   #define MAX_CREASES ${MAX_CREASES}
   precision highp float;
   uniform float uTime;
+
+  // Look / texture
   uniform float uSectors, uHueShift;
   uniform float uIridescence, uFilmIOR, uFilmNm, uFiber, uEdgeGlow;
+  uniform int   uTexKind;         // 0=kaleido(UV) 1=perlin 2=fractal julia
+  uniform float uTexScale;        // 1.0 at slider midpoint (×0.25..×4 overall)
+
+  // Folds (for edge glow visual only)
   uniform int   uCreaseCount;
   uniform vec3  uAeff[MAX_CREASES];
   uniform vec3  uDeff[MAX_CREASES];
+
   varying vec3 vPos; varying vec3 vN; varying vec3 vLocal; varying vec2 vUv;
 
   #define PI 3.14159265359
@@ -282,44 +313,93 @@ const fs = /* glsl */`
     vec3 phase  = 4.0 * PI * ior * nm * cosTheta / lambda;
     return 0.5 + 0.5*cos(phase);
   }
-  float signedDistanceToLine(vec2 p, vec2 a, vec2 d){
-    return d.x*(p.y - a.y) - d.y*(p.x - a.x);
+  float sdLine(vec2 p, vec2 a, vec2 d){
+    return abs(d.x*(p.y - a.y) - d.y*(p.x - a.x));
   }
 
-  void main(){
-    float theta = atan(vPos.z, vPos.x);
-    float r = length(vPos.xz) * 0.55;
+  // Groovy palettes
+  vec3 palette(float t){
+    return 0.55 + 0.45*cos(6.2831*(vec3(0.0,0.33,0.67)*t + vec3(0.0,0.15,0.25)));
+  }
+
+  vec3 tex_kaleido(vec2 uv){
+    // UV-centered polar kaleidoscope; uv in [-0.5,0.5] scaled by uTexScale
+    vec2 c = uv * uTexScale;
+    float theta = atan(c.y, c.x);
+    float r = length(c) * 1.0;                 // base radius
     float seg = 2.0*PI / max(3.0, uSectors);
     float a = mod(theta, seg); a = abs(a - 0.5*seg);
     vec2 k = vec2(cos(a), sin(a)) * r;
 
-    vec2 q = k*2.0 + vec2(0.15*uTime, -0.1*uTime);
-    q += 0.5*vec2(noise(q+13.1), noise(q+71.7));
+    vec2 q = k*2.0 + vec2(0.2*uTime, -0.14*uTime);
+    q += 0.6*vec2(noise(q+13.1), noise(q+71.7));
     float n = noise(q*2.0) * 0.75 + 0.25*noise(q*5.0);
     float hue = fract(n + 0.15*sin(uTime*0.3) + uHueShift);
-    vec3 baseCol = hsv2rgb(vec3(hue, 0.9, smoothstep(0.25, 1.0, n)));
+    return hsv2rgb(vec3(hue, 0.9, smoothstep(0.25, 1.0, n)));
+  }
+  vec3 tex_perlin(vec2 uv){
+    vec2 p = uv * uTexScale * 7.5;
+    // domain warp for groovy flow
+    vec2 w = vec2(fbm(p + vec2(0.0, uTime*0.3)), fbm(p + vec2(5.2, -uTime*0.25)));
+    p += 2.0*w;
+    float n = fbm(p);
+    float s = smoothstep(0.0, 1.0, n);
+    vec3 col = palette(s + 0.15*sin(uTime*0.25));
+    return mix(col, vec3(s), 0.15);
+  }
+  vec3 tex_fractal(vec2 uv){
+    // Julia set (animated c), centered uv * uTexScale
+    vec2 z = uv * (uTexScale*2.2);
+    vec2 c = 0.5*vec2(sin(0.31*uTime), cos(0.23*uTime));
+    float m = 0.0;
+    vec2 z0 = z;
+    const int ITR = 32;
+    for (int i=0;i<ITR;i++){
+      float x = (z.x*z.x - z.y*z.y) + c.x;
+      float y = (2.0*z.x*z.y) + c.y;
+      z = vec2(x,y);
+      if (dot(z,z) > 9.0) { m = float(i)/float(ITR); break; }
+      m = 1.0;
+    }
+    // orbit trap with a hint of the starting point for swirls
+    float trap = length(z0 - z)*0.35;
+    vec3 col = palette(0.2 + 0.8*m + 0.15*trap);
+    return col;
+  }
 
+  void main(){
+    // UV in [-0.5,0.5]
+    vec2 uv = vUv - 0.5;
+
+    vec3 baseCol;
+    if (uTexKind == 0) baseCol = tex_kaleido(uv);
+    else if (uTexKind == 1) baseCol = tex_perlin(uv);
+    else baseCol = tex_fractal(uv);
+
+    // paper fiber + grain (anchored to surface space)
     float fiberLines = 0.0;
     {
-      float warp = fbm(vLocal.xy*4.0 + vec2(0.2*uTime, -0.1*uTime));
-      float l = sin(vLocal.y*420.0 + warp*8.0);
+      float warp = fbm(vUv*4.0 + vec2(0.2*uTime, -0.1*uTime));
+      float l = sin(vUv.y*420.0 + warp*8.0);
       float widthAA = fwidth(l);
       fiberLines = smoothstep(0.6, 0.6 - widthAA, abs(l));
     }
-    float grain = fbm(vLocal.xy*25.0);
+    float grain = fbm(vUv*25.0);
     baseCol *= 1.0 + uFiber*(0.06*grain - 0.03) + uFiber*0.08*fiberLines;
 
+    // crease glow (distance in local plane)
     float minD = 1e9;
     for (int i=0; i<MAX_CREASES; i++){
       if (i >= uCreaseCount) break;
       vec2 a2 = uAeff[i].xy;
       vec2 d2 = normalize(uDeff[i].xy);
-      float sd = abs(signedDistanceToLine(vLocal.xy, a2, d2));
+      float sd = sdLine(vLocal.xy, a2, d2);
       minD = min(minD, sd);
     }
     float aa = fwidth(minD);
     float edge = 1.0 - smoothstep(0.0025, 0.0025 + aa, minD);
 
+    // iridescence
     vec3 V = normalize(cameraPosition - vPos);
     vec3 N = normalize(vN);
     float cosT = clamp(dot(N, V), 0.0, 1.0);
@@ -336,6 +416,8 @@ const fs = /* glsl */`
 
 const uniforms = {
   uTime:       { value: 0 },
+
+  // Look / texture
   uSectors:    { value: 10.0 },
   uHueShift:   { value: 0.0 },
   uIridescence:{ value: 0.65 },
@@ -343,7 +425,10 @@ const uniforms = {
   uFilmNm:     { value: 360.0 },
   uFiber:      { value: 0.35 },
   uEdgeGlow:   { value: 0.8 },
+  uTexKind:    { value: 0 },     // 0=kaleido,1=perlin,2=fractal
+  uTexScale:   { value: 1.0 },   // 1.0 at midpoint
 
+  // Folding data
   uCreaseCount: { value: 0 },
   uAeff:  { value: Array.from({length: MAX_CREASES}, () => new THREE.Vector3()) },
   uDeff:  { value: Array.from({length: MAX_CREASES}, () => new THREE.Vector3(1,0,0)) },
@@ -391,9 +476,9 @@ scene.add(new THREE.Mesh(
   new THREE.MeshBasicMaterial({ color: 0x070711, side: THREE.BackSide })
 ));
 
-// Build a plane subdivided into BASE_SEG with triangles, then cut along crease lines
-function buildCutSheetGeometry(size, seg, lines /* array of {A:Vec3, D:Vec3} */){
-  // Build base grid as non-indexed triangles
+// Build a plane subdivided into BASE_SEG, then cut along crease lines
+function buildCutSheetGeometry(size, seg, lines /* {A:Vec3, D:Vec3}[] */){
+  // Base grid → non-indexed triangles
   const tris = [];
   for (let iy=0; iy<seg; iy++){
     const v0 = -0.5 + iy/seg, v1 = -0.5 + (iy+1)/seg;
@@ -401,12 +486,12 @@ function buildCutSheetGeometry(size, seg, lines /* array of {A:Vec3, D:Vec3} */)
     for (let ix=0; ix<seg; ix++){
       const u0 = -0.5 + ix/seg, u1 = -0.5 + (ix+1)/seg;
       const x0 = u0 * size, x1 = u1 * size;
-      // tri A: (x0,y0)-(x1,y0)-(x1,y1)
+      // tri A
       tris.push({
         p:[ new THREE.Vector3(x0,y0,0), new THREE.Vector3(x1,y0,0), new THREE.Vector3(x1,y1,0) ],
         uv:[ new THREE.Vector2(u0+0.5, v0+0.5), new THREE.Vector2(u1+0.5, v0+0.5), new THREE.Vector2(u1+0.5, v1+0.5) ]
       });
-      // tri B: (x0,y0)-(x1,y1)-(x0,y1)
+      // tri B
       tris.push({
         p:[ new THREE.Vector3(x0,y0,0), new THREE.Vector3(x1,y1,0), new THREE.Vector3(x0,y1,0) ],
         uv:[ new THREE.Vector2(u0+0.5, v0+0.5), new THREE.Vector2(u1+0.5, v1+0.5), new THREE.Vector2(u0+0.5, v1+0.5) ]
@@ -422,21 +507,13 @@ function buildCutSheetGeometry(size, seg, lines /* array of {A:Vec3, D:Vec3} */)
     const t = sa / (sa - sb);
     return { p: lerpV3(a, b, t), uv: lerpV2(a.uv, b.uv, t) };
   }
-  // Split one triangle by a line (keep both sides)
   function splitTriByLine(tri, a, d){
     const P = tri.p, U = tri.uv;
     const s = [ sd(P[0],a,d), sd(P[1],a,d), sd(P[2],a,d) ];
-    const pos = [], neg = [], zer = [];
-    for (let i=0;i<3;i++){
-      if (s[i] >  EPS) pos.push(i);
-      else if (s[i] < -EPS) neg.push(i);
-      else zer.push(i);
-    }
-    if ((pos.length===0 && neg.length===0) || pos.length===0 || neg.length===0){
-      // entirely on one side or exactly on the line: no split
-      return [tri];
-    }
-    // Helper to package a tri
+    const pos = [], neg = [];
+    for (let i=0;i<3;i++){ (s[i] > EPS ? pos : (s[i] < -EPS ? neg : pos)).push(i); }
+    if (pos.length===0 || neg.length===0) return [tri];
+
     const mk = (a0,a1,a2) => ({ p:[a0.p||a0, a1.p||a1, a2.p||a2], uv:[a0.uv||U[a0], a1.uv||U[a1], a2.uv||U[a2]] });
 
     if (pos.length===1 && neg.length===2){
@@ -444,28 +521,18 @@ function buildCutSheetGeometry(size, seg, lines /* array of {A:Vec3, D:Vec3} */)
       const A0 = {p:P[ip], uv:U[ip]}, B1 = {p:P[in1], uv:U[in1]}, B2 = {p:P[in2], uv:U[in2]};
       const I1 = intersect(A0, B1, s[ip], s[in1]);
       const I2 = intersect(A0, B2, s[ip], s[in2]);
-      return [
-        mk(A0, I1, I2),           // positive side (triangle)
-        mk(B1, B2, I2),           // negative side (quad split into two tris)
-        mk(B1, I2, I1)
-      ];
+      return [ mk(A0, I1, I2), mk(B1, B2, I2), mk(B1, I2, I1) ];
     }
     if (pos.length===2 && neg.length===1){
-      const ip = neg[0], in1 = pos[0], in2 = pos[1];
-      const A0 = {p:P[ip], uv:U[ip]}, B1 = {p:P[in1], uv:U[in1]}, B2 = {p:P[in2], uv:U[in2]};
-      const I1 = intersect(B1, A0, s[in1], s[ip]);
-      const I2 = intersect(B2, A0, s[in2], s[ip]);
-      return [
-        mk(B1, B2, I2),           // positive side (quad → two tris)
-        mk(B1, I2, I1),
-        mk(A0, I1, I2)            // negative side (triangle)
-      ];
+      const ineg = neg[0], ip1 = pos[0], ip2 = pos[1];
+      const A0 = {p:P[ineg], uv:U[ineg]}, B1 = {p:P[ip1], uv:U[ip1]}, B2 = {p:P[ip2], uv:U[ip2]};
+      const I1 = intersect(B1, A0, s[ip1], s[ineg]);
+      const I2 = intersect(B2, A0, s[ip2], s[ineg]);
+      return [ mk(B1, B2, I2), mk(B1, I2, I1), mk(A0, I1, I2) ];
     }
-    // degenerate (collinear with vertex): don't split
     return [tri];
   }
 
-  // Cut along each line
   let cur = tris;
   for (const L of lines){
     const a = L.A, d = L.D.clone().normalize();
@@ -477,7 +544,6 @@ function buildCutSheetGeometry(size, seg, lines /* array of {A:Vec3, D:Vec3} */)
     cur = next;
   }
 
-  // Bake to BufferGeometry
   const pos = [], uv = [];
   for (const t of cur){
     for (let k=0;k<3;k++){
@@ -528,7 +594,8 @@ function updateLookAutos(dt, speedMul){
     a.ctrl.updateDisplay(); // live UI movement
   }
 }
-// Sliders + Auto toggles (every Look slider has an Auto)
+
+// Sliders + Texture controls (every slider has an Auto)
 const cSectors = looks.add(uniforms.uSectors, 'value', 3, 24, 1).name('kaleidoSectors');
 registerAuto(cSectors, 'kaleidoSectors', () => uniforms.uSectors.value, v => uniforms.uSectors.value = v, 3, 24, { integer:true });
 const cHue     = looks.add(uniforms.uHueShift, 'value', 0, 1, 0.001).name('hueShift');
@@ -547,86 +614,103 @@ const cBloomS  = looks.add(bloom, 'strength', 0.0, 2.5, 0.01).name('bloomStrengt
 registerAuto(cBloomS, 'bloomStrength', () => bloom.strength, v => (bloom.strength = v), 0.0, 2.5, {});
 const cBloomR  = looks.add(bloom, 'radius', 0.0, 1.5, 0.01).name('bloomRadius');
 registerAuto(cBloomR, 'bloomRadius', () => bloom.radius, v => (bloom.radius = v), 0.0, 1.5, {});
-looks.open();
+
+// Texture Type dropdown
+const texState = { kind: 'Kaleido (UV)' };
+const texCtrl  = looks.add(texState, 'kind', ['Kaleido (UV)', 'Perlin/FBM', 'Fractal (Julia)']).name('textureType');
+texCtrl.onChange(v => {
+  uniforms.uTexKind.value = (v.startsWith('Kaleido') ? 0 : (v.startsWith('Perlin') ? 1 : 2));
+});
+
+// Texture Scale (midpoint → ×1). We expose a 0..1 slider and map exponentially to ×0.25..×4
+const texScaleState = { scale01: 0.5 };
+const cTexScale = looks.add(texScaleState, 'scale01', 0, 1, 0.001).name('textureScale (×0.25…×4)');
+function applyTexScaleFrom01(x01){ uniforms.uTexScale.value = Math.pow(2, (x01 - 0.5) * 4.0); }
+cTexScale.onChange(v => applyTexScaleFrom01(v));
+applyTexScaleFrom01(texScaleState.scale01);
+// Auto for Texture Scale
+registerAuto(cTexScale, 'textureScale', () => texScaleState.scale01, v => { texScaleState.scale01 = v; applyTexScaleFrom01(v); }, 0, 1, {});
 
 // ---------- Presets (3 total) ----------
 function preset_half_vertical_valley(){
   resetBase();
-  addCrease({ Ax:0, Ay:0, Dx:0, Dy:1, deg:180, sign:VALLEY });
-  drive.stepCount = base.count;
+  addCrease({ Ax:0, Ay:0, Dx:0, Dy:1, deg:180, sign:VALLEY, t0:0.0, t1:1.0 });
   rebuildSheetGeometry();
+  rebuildCheckpoints();
 }
 function preset_gate_valley(){
   resetBase();
   const x = SIZE*0.25;
-  addCrease({ Ax:+x, Ay:0, Dx:0, Dy:1, deg:180, sign:VALLEY });
-  addCrease({ Ax:-x, Ay:0, Dx:0, Dy:1, deg:180, sign:VALLEY });
-  drive.stepCount = base.count;
+  addCrease({ Ax:+x, Ay:0, Dx:0, Dy:1, deg:180, sign:VALLEY, t0:0.00, t1:0.50 });
+  addCrease({ Ax:-x, Ay:0, Dx:0, Dy:1, deg:180, sign:VALLEY, t0:0.50, t1:1.00 });
   rebuildSheetGeometry();
+  rebuildCheckpoints();
 }
-// Crane (Demo) — sequential masked folds (kinematic approximation)
+
+// Crane (Demo) — timeline + masks approximating square base → petal folds → neck/tail/head
 function preset_crane_demo(){
   resetBase();
   const s = SIZE/2;
 
-  // Step 0: diagonal valley (pre-crease / collapse bias)
-  addCrease({ Ax:0, Ay:0, Dx:1, Dy:1, deg:180, sign:VALLEY });
+  // Precrease diagonals (valley) — overlap to simulate synchronous collapse bias
+  addCrease({ Ax:0, Ay:0, Dx:1, Dy: 1, deg:180, sign:VALLEY, t0:0.00, t1:0.12 });
+  addCrease({ Ax:0, Ay:0, Dx:1, Dy:-1, deg:180, sign:VALLEY, t0:0.00, t1:0.12 });
 
-  // Step 1: opposite diagonal valley
-  addCrease({ Ax:0, Ay:0, Dx:1, Dy:-1, deg:180, sign:VALLEY });
+  // Precrease medians (mountain) — overlap (standard preliminary base) 
+  addCrease({ Ax:0, Ay:0, Dx:0, Dy: 1, deg:180, sign:MOUNTAIN, t0:0.12, t1:0.24 });
+  addCrease({ Ax:0, Ay:0, Dx:1, Dy: 0, deg:180, sign:MOUNTAIN, t0:0.12, t1:0.24 });
 
-  // Step 2: central vertical valley — masked top half (start neck/tail split)
+  // Petal fold front (valley up) — localized to top region
   addCrease({
-    Ax:0, Ay:0, Dx:0, Dy:1, deg:150, sign:VALLEY,
-    masks:[
-      { Ax:0, Ay:0.00, Dx:0, Dy:1 },
-      { Ax:-0.0001, Ay:-0.0001, Dx: 1, Dy: 1 },
-      { Ax: 0.0001, Ay:-0.0001, Dx:-1, Dy: 1 },
-    ]
+    Ax:0, Ay:0, Dx:0, Dy:1, deg:150, sign:VALLEY, t0:0.24, t1:0.38,
+    masks:[ { Ax:0, Ay:0.00, Dx:0, Dy:1 }, { Ax:0, Ay:0, Dx:-1, Dy:0 }, { Ax:0, Ay:0, Dx:1, Dy:0 } ]
+  });
+  // Petal fold back (valley up) — localized to bottom region
+  addCrease({
+    Ax:0, Ay:0, Dx:0, Dy:1, deg:150, sign:VALLEY, t0:0.24, t1:0.38,
+    masks:[ { Ax:0, Ay:0.00, Dx:0, Dy:-1 }, { Ax:0, Ay:0, Dx:-1, Dy:0 }, { Ax:0, Ay:0, Dx:1, Dy:0 } ]
   });
 
-  // Step 3: central vertical mountain — masked bottom half
+  // Narrow the body (both sides to center) — diagonal valleys with masks (like step‑in folds)
   addCrease({
-    Ax:0, Ay:0, Dx:0, Dy:1, deg:150, sign:MOUNTAIN,
-    masks:[
-      { Ax:0, Ay:0.00, Dx:0, Dy:-1 },
-      { Ax:-0.0001, Ay: 0.0001, Dx: 1, Dy:-1 },
-      { Ax: 0.0001, Ay: 0.0001, Dx:-1, Dy:-1 },
-    ]
+    Ax:0, Ay:0, Dx:1, Dy: 1, deg:140, sign:VALLEY, t0:0.38, t1:0.52,
+    masks:[ { Ax:0, Ay:0, Dx:0, Dy:1 }, { Ax:0, Ay:0, Dx:-1, Dy:0 } ] // upper-left
+  });
+  addCrease({
+    Ax:0, Ay:0, Dx:1, Dy:-1, deg:140, sign:VALLEY, t0:0.38, t1:0.52,
+    masks:[ { Ax:0, Ay:0, Dx:0, Dy:1 }, { Ax:0, Ay:0, Dx: 1, Dy:0 } ] // upper-right
   });
 
-  // Step 4: wing right — diagonal valley masked right triangle
+  // Wings flatten down
   addCrease({
-    Ax:0, Ay:0, Dx:1, Dy:-1, deg:120, sign:VALLEY,
-    masks:[ { Ax:0, Ay:0, Dx:0, Dy:1 }, { Ax:0, Ay:0, Dx:1, Dy:0 } ]
+    Ax:0, Ay:0, Dx:1, Dy: 1, deg:110, sign:MOUNTAIN, t0:0.52, t1:0.66,
+    masks:[ { Ax:0, Ay:0, Dx:0, Dy:1 } ]
+  });
+  addCrease({
+    Ax:0, Ay:0, Dx:1, Dy:-1, deg:110, sign:MOUNTAIN, t0:0.52, t1:0.66,
+    masks:[ { Ax:0, Ay:0, Dx:0, Dy:1 } ]
   });
 
-  // Step 5: wing left — diagonal valley masked left triangle
+  // Inside‑reverse tail (approx) — sharp valley with small mask
   addCrease({
-    Ax:0, Ay:0, Dx:1, Dy:1, deg:120, sign:VALLEY,
-    masks:[ { Ax:0, Ay:0, Dx:0, Dy:1 }, { Ax:0, Ay:0, Dx:-1, Dy:0 } ]
+    Ax: 0.16*s, Ay:-0.30*s, Dx:1, Dy:-0.20, deg:165, sign:VALLEY, t0:0.66, t1:0.80,
+    masks:[ { Ax: 0.05*s, Ay:-0.10*s, Dx:0, Dy:-1 }, { Ax:0, Ay:0, Dx:1, Dy:0 } ]
   });
 
-  // Step 6: tail inside-reverse (approx)
+  // Inside‑reverse neck (approx) — mirror
   addCrease({
-    Ax:0.0, Ay:-0.3*s, Dx:1, Dy:-0.15, deg:140, sign:VALLEY,
-    masks:[ { Ax:0, Ay:-0.1, Dx:0, Dy:-1 }, { Ax: 0.0, Ay:0.0, Dx:1, Dy:0 } ]
+    Ax:-0.16*s, Ay:-0.30*s, Dx:-1, Dy:-0.20, deg:165, sign:VALLEY, t0:0.80, t1:0.92,
+    masks:[ { Ax:-0.05*s, Ay:-0.10*s, Dx:0, Dy:-1 }, { Ax:0, Ay:0, Dx:-1, Dy:0 } ]
   });
 
-  // Step 7: neck inside-reverse (approx)
+  // Head (small mountain)
   addCrease({
-    Ax:0.0, Ay:-0.3*s, Dx:-1, Dy:-0.15, deg:140, sign:VALLEY,
-    masks:[ { Ax:0, Ay:-0.1, Dx:0, Dy:-1 }, { Ax: 0.0, Ay:0.0, Dx:-1, Dy:0 } ]
+    Ax:-0.44*s, Ay:-0.63*s, Dx:1, Dy:-0.2, deg:90, sign:MOUNTAIN, t0:0.92, t1:1.00,
+    masks:[ { Ax:-0.1, Ay:-0.2, Dx:-1, Dy:-1 }, { Ax:-0.2, Ay:-0.2, Dx:-1, Dy:0 } ]
   });
 
-  // Step 8: head — small mountain
-  addCrease({
-    Ax:-0.45*s, Ay:-0.65*s, Dx:1, Dy:-0.2, deg:90, sign:MOUNTAIN,
-    masks:[ { Ax:-0.1, Ay:-0.2, Dx:-1, Dy:-1 }, { Ax:-0.2, Ay:-0.2, Dx:-1, Dy: 0 } ]
-  });
-
-  drive.stepCount = base.count;
   rebuildSheetGeometry();
+  rebuildCheckpoints();
 }
 
 // ---------- DOM controls ----------
@@ -643,13 +727,24 @@ const easingSel = document.getElementById('easing');
 const stepInfo  = document.getElementById('stepInfo');
 
 function setProgress(p){ drive.progress = clamp01(p); progress.value = String(drive.progress.toFixed(3)); }
-function stepFromProgress(){ const N = Math.max(1, drive.stepCount); return Math.min(N, Math.floor(N*drive.progress) + 1); }
-function updateStepInfo(){ stepInfo.textContent = `Step ${stepFromProgress()}/${drive.stepCount}`; }
+function currentStepIndex(){
+  const cps = drive.checkpoints;
+  const p = drive.progress;
+  let idx = 0;
+  for (let i=0;i<cps.length-1;i++){
+    if (p >= cps[i] && p < cps[i+1]) { idx = i; break; }
+    if (p >= cps[cps.length-1]) idx = cps.length-2;
+  }
+  return idx;
+}
+function updateStepInfo(){
+  const idx = currentStepIndex();
+  stepInfo.textContent = `Step ${idx+1}/${drive.stepCount}`;
+}
 
 btnApply.onclick = () => {
   const v = presetSel.value;
 
-  // presets (no FOLD imports)
   if (v === 'half-vertical-valley') preset_half_vertical_valley();
   else if (v === 'gate-valley')     preset_gate_valley();
   else if (v === 'crane-demo')      preset_crane_demo();
@@ -669,19 +764,21 @@ btnReset.onclick = () => {
   setProgress(0.0); updateStepInfo();
 };
 btnPrev.onclick = () => {
-  const N = Math.max(1, drive.stepCount);
-  const k = Math.floor(N*drive.progress);
-  setProgress((Math.max(0, k-1))/N);
+  const cps = drive.checkpoints;
+  const idx = currentStepIndex();
+  const prev = Math.max(0, idx - 1);
+  setProgress(cps[prev]);
   updateStepInfo();
 };
 btnNext.onclick = () => {
-  const N = Math.max(1, drive.stepCount);
-  const k = Math.floor(N*drive.progress);
-  setProgress((Math.min(N, k+1))/N);
+  const cps = drive.checkpoints;
+  const idx = currentStepIndex();
+  const next = Math.min(cps.length-1, idx + 1);
+  setProgress(cps[next]);
   updateStepInfo();
 };
 progress.addEventListener('input', () => { setProgress(parseFloat(progress.value)); updateStepInfo(); });
-speed.addEventListener('input',   () => {/* multiplier is read each frame */});
+speed.addEventListener('input',   () => {/* multiplier read each frame */});
 easingSel.addEventListener('change', () => { drive.easing = easingSel.value; });
 
 btnSnap.onclick = () => {
@@ -739,7 +836,6 @@ function tick(t){
   if (!tick._prev) tick._prev = tSec;
   const dt = clamp(tSec - tick._prev, 0, 0.1); tick._prev = tSec;
 
-  // speed multiplier affects *all* autos
   const speedMul = speedMultiplierFromSlider(parseFloat(speed.value || '0.5'));
 
   updateProgressAuto(dt, speedMul);
@@ -760,5 +856,9 @@ window.addEventListener('resize', () => {
   fxaa.material.uniforms.resolution.value.set(1 / w, 1 / h);
 });
 
-// ---------- Conventions ----------
-// valley = +°, mountain = −°. (Rigid origami angles are dihedral signs between adjacent panels.) :contentReference[oaicite:4]{index=4}
+// ---------- Conventions & theory ----------
+// Valley = +°, Mountain = −° (sign of the dihedral). For realistic paper behavior across
+// complex patterns, a rigid-panel + hinge model with constraints (edge lengths constant,
+// hinge angles specified) is solved iteratively on the GPU in the MIT simulator; our
+// timeline + masks approximate a traditional crane sequence (preliminary base → petal
+// folds → inside reverse), but a solver is what makes it “actually like paper.” 
