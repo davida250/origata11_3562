@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <title>Origata v0.25</title>
+  <title>Origata v0.29</title>
   <meta name="theme-color" content="#050509" />
   <style>
     html, body { height: 100%; margin: 0; background: #050509; }
@@ -30,7 +30,7 @@
     .muted { opacity: 0.8 }
   </style>
 
-  <!-- ESM polyfill (safe on modern browsers) -->
+  <!-- ESM polyfill -->
   <script async src="https://unpkg.com/es-module-shims@2.6.2/dist/es-module-shims.js"></script>
 
   <!-- Import map: three.js + lil-gui -->
@@ -53,15 +53,10 @@
       <label>
         Model / Preset
         <select id="preset">
-          <optgroup label="Simple folds">
-            <option value="half-vertical-valley" selected>Book Fold (Half Vertical, Valley)</option>
-            <option value="half-horizontal-valley">Half Horizontal (Valley)</option>
-            <option value="diagonal-valley">Diagonal (Valley)</option>
-            <option value="gate-valley">Gate Fold (2 × Valley)</option>
-            <option value="accordion-5">Accordion (5 creases, alt M/V)</option>
-            <option value="single-vertical-mountain">Single Vertical (Mountain)</option>
+          <optgroup label="Primitives">
+            <option value="half-vertical-valley" selected>Book Fold</option>
+            <option value="gate-valley">Gate Fold</option>
           </optgroup>
-          <!-- Crane/Bird removed -->
         </select>
       </label>
       <button id="btnApply">Apply</button>
@@ -79,9 +74,9 @@
     </div>
 
     <div class="row">
-      <label>
-        Speed
-        <input id="speed" type="range" min="0.05" max="3" step="0.01" value="0.25" />
+      <label title="Left = 0.2× slower, Mid = 1×, Right = 5× faster">
+        Speed (×0.2 … ×5)
+        <input id="speed" type="range" min="0" max="1" step="0.001" value="0.5" />
       </label>
       <label>
         Easing
@@ -96,7 +91,7 @@
 
     <div class="row">
       <button id="btnSnap" title="Save current frame as PNG">Save PNG</button>
-      <label class="muted">Look controls are in the lil‑gui panel (top‑right). Each has an Auto toggle.</label>
+      <label class="muted">Open the lil‑gui “Look” panel (top‑right) for Texture Type + Texture Scale (with Auto).</label>
     </div>
   </div>
 
