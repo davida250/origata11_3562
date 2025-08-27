@@ -1,15 +1,12 @@
 /**
  * Origami — Rigid‑Hinge Folding with UV‑space Textures (Kaleido / Perlin / Fractal)
- * - Global progress ∈ [0..1] maps across a fold timeline (creases can overlap in time).
- * - Speed slider is a multiplier for *all* auto motion (Play + Look/Auto).
- * - Presets: Book Fold, Gate Fold, Crane (Demo). No file loads.
- * - Textures in **UV space** (not world) so patterns stay glued to the paper as it folds.
- * - Texture Type: Kaleido (UV), Perlin/FBM, Fractal (Julia); Texture Scale has an **Auto**.
+ * - Global progress ∈ [0..1] maps across a fold timeline (creases may overlap in time).
+ * - Speed slider is a multiplier for *all* auto motion (Play + Look/Auto):
+ *     left=×0.2, mid=×1, right=×5.
+ * - Presets: Book Fold, Gate Fold. (No crane / no file loads.)
+ * - Textures in UV space so patterns stay glued to the paper as it folds.
+ * - Each Look control has an Auto checkbox (triangle‑wave oscillation with live UI).
  * - Mesh is cut along every crease line → crisp hinges, planar panels.
- *
- * If you want *exact* paper‑like behavior for arbitrary crease patterns,
- * you need a constraint/energy solver that enforces isometry + dihedral constraints,
- * e.g., the MIT Origami Simulator’s GPU method with FOLD geometry. 
  */
 
 import * as THREE from 'three';
@@ -87,9 +84,8 @@ const base = {
   mCount: new Array(MAX_CREASES).fill(0),
   mA:  Array.from({ length: MAX_CREASES }, () => Array.from({ length: MAX_MASKS_PER }, () => new THREE.Vector3())),
   mD:  Array.from({ length: MAX_CREASES }, () => Array.from({ length: MAX_MASKS_PER }, () => new THREE.Vector3(1,0,0))),
-  // fold timeline per crease; if t0[i]<0 → sequential default i/N..(i+1)/N
-  t0:  new Array(MAX_CREASES).fill(-1),
-  t1:  new Array(MAX_CREASES).fill(-1)
+  t0:  new Array(MAX_CREASES).fill(-1),      // start time in [0..1], −1 = sequential default
+  t1:  new Array(MAX_CREASES).fill(-1)       // end time
 };
 function resetBase(){
   base.count = 0;
@@ -155,7 +151,6 @@ function rebuildCheckpoints(){
 }
 
 // Map global progress → per-crease angles along timeline.
-// If t0<0, default segment is i/N..(i+1)/N.
 function computeAngles(){
   const E = Easings[drive.easing] || Easings.linear;
   const N = Math.max(1, base.count);
@@ -255,8 +250,10 @@ const vs = /* glsl */`
 
     for (int i=0; i<MAX_CREASES; i++){
       if (i >= uCreaseCount) break;
+
       vec3 a = uAeff[i];
       vec3 d = normalize(uDeff[i]);
+
       float sd = signedDistanceToLine(p.xy, a.xy, d.xy);
       if (sd > 0.0 && inMask(i, p.xy)){
         p = rotateAroundLine(p, a, d, uAng[i]);
@@ -326,7 +323,7 @@ const fs = /* glsl */`
     // UV-centered polar kaleidoscope; uv in [-0.5,0.5] scaled by uTexScale
     vec2 c = uv * uTexScale;
     float theta = atan(c.y, c.x);
-    float r = length(c) * 1.0;                 // base radius
+    float r = length(c) * 1.0;
     float seg = 2.0*PI / max(3.0, uSectors);
     float a = mod(theta, seg); a = abs(a - 0.5*seg);
     vec2 k = vec2(cos(a), sin(a)) * r;
@@ -361,7 +358,6 @@ const fs = /* glsl */`
       if (dot(z,z) > 9.0) { m = float(i)/float(ITR); break; }
       m = 1.0;
     }
-    // orbit trap with a hint of the starting point for swirls
     float trap = length(z0 - z)*0.35;
     vec3 col = palette(0.2 + 0.8*m + 0.15*trap);
     return col;
@@ -595,7 +591,7 @@ function updateLookAutos(dt, speedMul){
   }
 }
 
-// Sliders + Texture controls (every slider has an Auto)
+// Sliders + Texture controls (every Look slider has an Auto)
 const cSectors = looks.add(uniforms.uSectors, 'value', 3, 24, 1).name('kaleidoSectors');
 registerAuto(cSectors, 'kaleidoSectors', () => uniforms.uSectors.value, v => uniforms.uSectors.value = v, 3, 24, { integer:true });
 const cHue     = looks.add(uniforms.uHueShift, 'value', 0, 1, 0.001).name('hueShift');
@@ -622,16 +618,15 @@ texCtrl.onChange(v => {
   uniforms.uTexKind.value = (v.startsWith('Kaleido') ? 0 : (v.startsWith('Perlin') ? 1 : 2));
 });
 
-// Texture Scale (midpoint → ×1). We expose a 0..1 slider and map exponentially to ×0.25..×4
+// Texture Scale (midpoint → ×1). Expose 0..1 slider and map exponentially to ×0.25..×4
 const texScaleState = { scale01: 0.5 };
 const cTexScale = looks.add(texScaleState, 'scale01', 0, 1, 0.001).name('textureScale (×0.25…×4)');
 function applyTexScaleFrom01(x01){ uniforms.uTexScale.value = Math.pow(2, (x01 - 0.5) * 4.0); }
 cTexScale.onChange(v => applyTexScaleFrom01(v));
 applyTexScaleFrom01(texScaleState.scale01);
-// Auto for Texture Scale
 registerAuto(cTexScale, 'textureScale', () => texScaleState.scale01, v => { texScaleState.scale01 = v; applyTexScaleFrom01(v); }, 0, 1, {});
 
-// ---------- Presets (3 total) ----------
+// ---------- Presets (2 total) ----------
 function preset_half_vertical_valley(){
   resetBase();
   addCrease({ Ax:0, Ay:0, Dx:0, Dy:1, deg:180, sign:VALLEY, t0:0.0, t1:1.0 });
@@ -643,72 +638,6 @@ function preset_gate_valley(){
   const x = SIZE*0.25;
   addCrease({ Ax:+x, Ay:0, Dx:0, Dy:1, deg:180, sign:VALLEY, t0:0.00, t1:0.50 });
   addCrease({ Ax:-x, Ay:0, Dx:0, Dy:1, deg:180, sign:VALLEY, t0:0.50, t1:1.00 });
-  rebuildSheetGeometry();
-  rebuildCheckpoints();
-}
-
-// Crane (Demo) — timeline + masks approximating square base → petal folds → neck/tail/head
-function preset_crane_demo(){
-  resetBase();
-  const s = SIZE/2;
-
-  // Precrease diagonals (valley) — overlap to simulate synchronous collapse bias
-  addCrease({ Ax:0, Ay:0, Dx:1, Dy: 1, deg:180, sign:VALLEY, t0:0.00, t1:0.12 });
-  addCrease({ Ax:0, Ay:0, Dx:1, Dy:-1, deg:180, sign:VALLEY, t0:0.00, t1:0.12 });
-
-  // Precrease medians (mountain) — overlap (standard preliminary base) 
-  addCrease({ Ax:0, Ay:0, Dx:0, Dy: 1, deg:180, sign:MOUNTAIN, t0:0.12, t1:0.24 });
-  addCrease({ Ax:0, Ay:0, Dx:1, Dy: 0, deg:180, sign:MOUNTAIN, t0:0.12, t1:0.24 });
-
-  // Petal fold front (valley up) — localized to top region
-  addCrease({
-    Ax:0, Ay:0, Dx:0, Dy:1, deg:150, sign:VALLEY, t0:0.24, t1:0.38,
-    masks:[ { Ax:0, Ay:0.00, Dx:0, Dy:1 }, { Ax:0, Ay:0, Dx:-1, Dy:0 }, { Ax:0, Ay:0, Dx:1, Dy:0 } ]
-  });
-  // Petal fold back (valley up) — localized to bottom region
-  addCrease({
-    Ax:0, Ay:0, Dx:0, Dy:1, deg:150, sign:VALLEY, t0:0.24, t1:0.38,
-    masks:[ { Ax:0, Ay:0.00, Dx:0, Dy:-1 }, { Ax:0, Ay:0, Dx:-1, Dy:0 }, { Ax:0, Ay:0, Dx:1, Dy:0 } ]
-  });
-
-  // Narrow the body (both sides to center) — diagonal valleys with masks (like step‑in folds)
-  addCrease({
-    Ax:0, Ay:0, Dx:1, Dy: 1, deg:140, sign:VALLEY, t0:0.38, t1:0.52,
-    masks:[ { Ax:0, Ay:0, Dx:0, Dy:1 }, { Ax:0, Ay:0, Dx:-1, Dy:0 } ] // upper-left
-  });
-  addCrease({
-    Ax:0, Ay:0, Dx:1, Dy:-1, deg:140, sign:VALLEY, t0:0.38, t1:0.52,
-    masks:[ { Ax:0, Ay:0, Dx:0, Dy:1 }, { Ax:0, Ay:0, Dx: 1, Dy:0 } ] // upper-right
-  });
-
-  // Wings flatten down
-  addCrease({
-    Ax:0, Ay:0, Dx:1, Dy: 1, deg:110, sign:MOUNTAIN, t0:0.52, t1:0.66,
-    masks:[ { Ax:0, Ay:0, Dx:0, Dy:1 } ]
-  });
-  addCrease({
-    Ax:0, Ay:0, Dx:1, Dy:-1, deg:110, sign:MOUNTAIN, t0:0.52, t1:0.66,
-    masks:[ { Ax:0, Ay:0, Dx:0, Dy:1 } ]
-  });
-
-  // Inside‑reverse tail (approx) — sharp valley with small mask
-  addCrease({
-    Ax: 0.16*s, Ay:-0.30*s, Dx:1, Dy:-0.20, deg:165, sign:VALLEY, t0:0.66, t1:0.80,
-    masks:[ { Ax: 0.05*s, Ay:-0.10*s, Dx:0, Dy:-1 }, { Ax:0, Ay:0, Dx:1, Dy:0 } ]
-  });
-
-  // Inside‑reverse neck (approx) — mirror
-  addCrease({
-    Ax:-0.16*s, Ay:-0.30*s, Dx:-1, Dy:-0.20, deg:165, sign:VALLEY, t0:0.80, t1:0.92,
-    masks:[ { Ax:-0.05*s, Ay:-0.10*s, Dx:0, Dy:-1 }, { Ax:0, Ay:0, Dx:-1, Dy:0 } ]
-  });
-
-  // Head (small mountain)
-  addCrease({
-    Ax:-0.44*s, Ay:-0.63*s, Dx:1, Dy:-0.2, deg:90, sign:MOUNTAIN, t0:0.92, t1:1.00,
-    masks:[ { Ax:-0.1, Ay:-0.2, Dx:-1, Dy:-1 }, { Ax:-0.2, Ay:-0.2, Dx:-1, Dy:0 } ]
-  });
-
   rebuildSheetGeometry();
   rebuildCheckpoints();
 }
@@ -747,7 +676,6 @@ btnApply.onclick = () => {
 
   if (v === 'half-vertical-valley') preset_half_vertical_valley();
   else if (v === 'gate-valley')     preset_gate_valley();
-  else if (v === 'crane-demo')      preset_crane_demo();
 
   setProgress(0.0); updateStepInfo();
   camera.position.x += (Math.random()-0.5) * 0.03;
@@ -791,8 +719,8 @@ btnSnap.onclick = () => {
   }, 'image/png', 1.0);
 };
 
-// ---------- Start ----------
-presetSel.value = 'crane-demo';
+// ---------- Start (Book Fold default) ----------
+presetSel.value = 'half-vertical-valley';
 btnApply.click();
 progress.value = String(drive.progress);
 
@@ -800,27 +728,7 @@ progress.value = String(drive.progress);
 function updateFolding(){
   computeAngles();
   computeEffectiveFrames();
-  // push to uniforms
-  uniforms.uCreaseCount.value = base.count;
-  uniforms.uAeff.value = eff.A.map(v => v.clone());
-  uniforms.uDeff.value = eff.D.map(v => v.clone());
-  uniforms.uAng.value  = Float32Array.from(eff.ang);
-
-  const flatA = []; const flatD = []; const on = [];
-  for (let i=0;i<base.count;i++){
-    for (let m=0;m<MAX_MASKS_PER;m++){
-      flatA.push(eff.mA[i][m].clone());
-      flatD.push(eff.mD[i][m].clone());
-      on.push(m < eff.mCount[i] ? 1 : 0);
-    }
-  }
-  const remain = MAX_CREASES*MAX_MASKS_PER - flatA.length;
-  for (let r=0;r<remain;r++){ flatA.push(new THREE.Vector3()); flatD.push(new THREE.Vector3(1,0,0)); on.push(0); }
-  uniforms.uMaskA.value = flatA;
-  uniforms.uMaskD.value = flatD;
-  uniforms.uMaskOn.value = Float32Array.from(on);
-
-  mat.uniformsNeedUpdate = true;
+  pushEffToUniforms();
 }
 function updateProgressAuto(dt, speedMul){
   if (!drive.animate) return;
@@ -836,7 +744,7 @@ function tick(t){
   if (!tick._prev) tick._prev = tSec;
   const dt = clamp(tSec - tick._prev, 0, 0.1); tick._prev = tSec;
 
-  const speedMul = speedMultiplierFromSlider(parseFloat(speed.value || '0.5'));
+  const speedMul = Math.max(0.2, Math.min(5, Math.pow(5, (parseFloat(speed.value || '0.5') - 0.5) * 2.0)));
 
   updateProgressAuto(dt, speedMul);
   updateLookAutos(dt, speedMul);
@@ -856,9 +764,5 @@ window.addEventListener('resize', () => {
   fxaa.material.uniforms.resolution.value.set(1 / w, 1 / h);
 });
 
-// ---------- Conventions & theory ----------
-// Valley = +°, Mountain = −° (sign of the dihedral). For realistic paper behavior across
-// complex patterns, a rigid-panel + hinge model with constraints (edge lengths constant,
-// hinge angles specified) is solved iteratively on the GPU in the MIT simulator; our
-// timeline + masks approximate a traditional crane sequence (preliminary base → petal
-// folds → inside reverse), but a solver is what makes it “actually like paper.” 
+// ---------- Conventions ----------
+/* valley = +°, mountain = −°. */
