@@ -1,17 +1,15 @@
-// Iridescent Folding Crystal — single evolving shape
-// No bundler required. Uses CDNs for three.js, examples, and lil-gui.
+// Iridescent Folding Crystal — single evolving shape.
+// Load directly in a modern browser. No build tools required.
 
 import * as THREE from 'https://unpkg.com/three@0.160.0/build/three.module.js';
-import { OrbitControls } from 'https://unpkg.com/three@0.160.0/examples/jsm/controls/OrbitControls.js';
-import { ConvexGeometry } from 'https://unpkg.com/three@0.160.0/examples/jsm/geometries/ConvexGeometry.js';
-import { EffectComposer } from 'https://unpkg.com/three@0.160.0/examples/jsm/postprocessing/EffectComposer.js';
-import { RenderPass } from 'https://unpkg.com/three@0.160.0/examples/jsm/postprocessing/RenderPass.js';
-import { UnrealBloomPass } from 'https://unpkg.com/three@0.160.0/examples/jsm/postprocessing/UnrealBloomPass.js';
+import { OrbitControls } from 'https://unpkg.com/three@0.160.0/examples/jsm/controls/OrbitControls.js?module';
+import { ConvexGeometry } from 'https://unpkg.com/three@0.160.0/examples/jsm/geometries/ConvexGeometry.js?module';
+import { EffectComposer } from 'https://unpkg.com/three@0.160.0/examples/jsm/postprocessing/EffectComposer.js?module';
+import { RenderPass } from 'https://unpkg.com/three@0.160.0/examples/jsm/postprocessing/RenderPass.js?module';
+import { UnrealBloomPass } from 'https://unpkg.com/three@0.160.0/examples/jsm/postprocessing/UnrealBloomPass.js?module';
 import GUI from 'https://cdn.jsdelivr.net/npm/lil-gui@0.19/+esm';
 
-// ---------------------------------------------------------
-// Minimal, focused controls to steer look & motion
-// ---------------------------------------------------------
+// ---- Controls (minimal, right side) ----
 const params = {
   speed: 1.0,            // animation rate
   fold: 0.85,            // fold intensity
@@ -25,9 +23,7 @@ const params = {
   reseed: () => reseed(true), // rebuild base shape
 };
 
-// ---------------------------------------------------------
-// Renderer / Scene / Camera
-// ---------------------------------------------------------
+// ---- Renderer / Scene / Camera ----
 const canvas = /** @type {HTMLCanvasElement} */ (document.getElementById('scene'));
 const renderer = new THREE.WebGLRenderer({
   canvas,
@@ -52,23 +48,19 @@ controls.enableDamping = true;
 controls.dampingFactor = 0.08;
 controls.rotateSpeed = 0.6;
 
-// ---------------------------------------------------------
-// Postprocessing (subtle glow to echo the photos)
-// ---------------------------------------------------------
+// ---- Postprocessing (subtle glow) ----
 let composer, bloom;
 function setupComposer() {
   const size = new THREE.Vector2();
   renderer.getSize(size);
   composer = new EffectComposer(renderer);
   composer.addPass(new RenderPass(scene, camera));
-  bloom = new UnrealBloomPass(size, 0.32, 0.7, 0.0); // mild
+  bloom = new UnrealBloomPass(size, 0.32, 0.7, 0.0); // gentle glow
   composer.addPass(bloom);
 }
 setupComposer();
 
-// ---------------------------------------------------------
-// Utilities
-// ---------------------------------------------------------
+// ---- Utilities ----
 function mulberry32(a) {
   return function () {
     let t = (a += 0x6D2B79F5);
@@ -78,9 +70,7 @@ function mulberry32(a) {
   };
 }
 
-// ---------------------------------------------------------
-// Shaders (folding + thin-film interference-like palette)
-// ---------------------------------------------------------
+// ---- Shaders (folding + thin-film palette) ----
 const vertexShader = /* glsl */ `
   varying vec3 vWorldPos;
   varying vec3 vNormalW;
@@ -147,7 +137,7 @@ const vertexShader = /* glsl */ `
                                   dot(p2,x2), dot(p3,x3) ) );
   }
 
-  // Triangular-wave folding along plane normal `n`
+  // Triangular-wave folding along plane normal n
   vec3 foldSpace(vec3 p, vec3 n, float period, float intensity) {
     float d = dot(p, n); // signed distance along n
     float tri = abs(mod(d + period, 2.0*period) - period) - 0.5*period;
@@ -243,9 +233,7 @@ const fragmentShader = /* glsl */ `
   }
 `;
 
-// ---------------------------------------------------------
-// Material & Geometry
-// ---------------------------------------------------------
+// ---- Material & Geometry ----
 function makeMaterial(seed) {
   const uniforms = {
     uTime:        { value: 0 },
@@ -260,7 +248,7 @@ function makeMaterial(seed) {
     uFoldN2:      { value: new THREE.Vector3(0, 1, 0).normalize() },
     uSeed:        { value: seed },
   };
-  const mat = new THREE.ShaderMaterial({
+  return new THREE.ShaderMaterial({
     vertexShader,
     fragmentShader,
     uniforms,
@@ -269,7 +257,6 @@ function makeMaterial(seed) {
     depthWrite: true,
     transparent: false,
   });
-  return mat;
 }
 
 function makeConvexShard(seed, scale = 1.0) {
@@ -290,8 +277,7 @@ function makeConvexShard(seed, scale = 1.0) {
     pts.push(p);
   }
   let geom = new ConvexGeometry(pts);
-  // Flat shading: drop indexing so each face has its own vertices/normals
-  geom = geom.toNonIndexed();
+  geom = geom.toNonIndexed();     // flat-shaded facets
   geom.computeVertexNormals();
   geom.center();
   geom.scale(scale, scale, scale);
@@ -299,18 +285,14 @@ function makeConvexShard(seed, scale = 1.0) {
   return geom;
 }
 
-// ---------------------------------------------------------
-// Create the shard (one evolving object)
-// ---------------------------------------------------------
+// ---- Create the shard (one evolving object) ----
 let seed = 0.1375;
 const material = makeMaterial(seed);
 const shard = new THREE.Mesh(makeConvexShard(seed, 1.0), material);
 shard.rotation.set(0.32, -0.18, 0.12);
 scene.add(shard);
 
-// ---------------------------------------------------------
-// GUI (minimal footprint, right side)
-// ---------------------------------------------------------
+// ---- GUI (minimal) ----
 const gui = new GUI({ title: 'Controls', width: 300 });
 gui.add(params, 'speed', 0.0, 3.0, 0.01).name('Speed');
 gui.add(params, 'fold', 0.0, 1.5, 0.01).name('Fold Intensity').onChange(syncUniforms);
@@ -323,7 +305,6 @@ gui.add(params, 'pastel', 0.0, 1.0, 0.001).name('Pastel Bias').onChange(syncUnif
 gui.add(params, 'rotate').name('Auto Rotate');
 gui.add(params, 'reseed').name('Reseed Shape');
 
-// reflect GUI changes into shader uniforms
 function syncUniforms() {
   material.uniforms.uFold.value       = params.fold;
   material.uniforms.uNoiseAmp.value   = params.noiseAmp;
@@ -335,7 +316,6 @@ function syncUniforms() {
 }
 syncUniforms();
 
-// Rebuild base geometry + randomize fold axes
 function reseed(rebuildGeometry = false) {
   seed = Math.random() * 10.0 + 0.01;
   material.uniforms.uSeed.value = seed;
@@ -348,9 +328,7 @@ function reseed(rebuildGeometry = false) {
   }
 }
 
-// ---------------------------------------------------------
-// Resize handling (keep room for the control panel)
-// ---------------------------------------------------------
+// ---- Resize: keep canvas out from under the panel ----
 function getPanelWidth() {
   const el = document.querySelector('.lil-gui.root');
   return el ? Math.ceil(el.getBoundingClientRect().width) : 300;
@@ -359,7 +337,8 @@ function resizeRenderer() {
   const panelW = getPanelWidth();
   const width = Math.max(1, window.innerWidth - panelW);
   const height = Math.max(1, window.innerHeight);
-  renderer.setSize(width, height, false);
+  // update both drawing buffer and CSS size
+  renderer.setSize(width, height, true);
   composer.setSize(width, height);
   camera.aspect = width / height;
   camera.updateProjectionMatrix();
@@ -367,9 +346,7 @@ function resizeRenderer() {
 window.addEventListener('resize', resizeRenderer);
 resizeRenderer();
 
-// ---------------------------------------------------------
-// Animation loop — single shape continuously evolving
-// ---------------------------------------------------------
+// ---- Animation loop — single shape continuously evolving ----
 const clock = new THREE.Clock();
 let time = 0;
 
@@ -377,10 +354,8 @@ function animate() {
   const dt = clock.getDelta();
   time += dt * (0.6 + params.speed * 1.4);
 
-  // update uniforms
   material.uniforms.uTime.value = time;
 
-  // gentle autorotation (you can also orbit with the mouse)
   if (params.rotate) {
     shard.rotation.y += dt * 0.25;
     shard.rotation.x += dt * 0.07;
@@ -390,5 +365,4 @@ function animate() {
   composer.render();
   requestAnimationFrame(animate);
 }
-
 requestAnimationFrame(animate);
