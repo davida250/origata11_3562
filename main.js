@@ -1,11 +1,9 @@
-// ----------------------------------------------
 // Folding Iridescent Shape (SDF ray-march) in Three.js
-// ----------------------------------------------
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import GUI from 'https://unpkg.com/lil-gui@0.19/dist/lil-gui.esm.min.js';
+import GUI from 'lil-gui';
 
-// Scene setup
+// ---- Scene setup ----
 const app = document.getElementById("app");
 const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -13,8 +11,8 @@ renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 app.appendChild(renderer.domElement);
 
-const scene = new THREE.Scene();
-const camera = new THREE.PerspectiveCamera(40, window.innerWidth / window.innerHeight, 0.01, 100);
+const scene   = new THREE.Scene();
+const camera  = new THREE.PerspectiveCamera(40, window.innerWidth / window.innerHeight, 0.01, 100);
 camera.position.set(0.0, 0.0, 3.5);
 camera.lookAt(0, 0, 0);
 
@@ -23,8 +21,9 @@ controls.enableDamping = true;
 controls.dampingFactor = 0.06;
 controls.enablePan = false;
 
-// Fullscreen plane to run the shader on
+// ---- Fullscreen quad & uniforms ----
 const quadGeo = new THREE.PlaneGeometry(2, 2);
+
 const uniforms = {
   uTime: { value: 0 },
   uSpeed: { value: 0.9 },
@@ -34,11 +33,11 @@ const uniforms = {
   uStripeFreq: { value: 8.0 },
   uStripeWarp: { value: 0.7 },
   uIriStrength: { value: 1.0 },
-  uFilmThickness: { value: 420.0 }, // in nm
+  uFilmThickness: { value: 420.0 }, // nanometers
   uColorDelay: { value: 0.35 },
   uExposure: { value: 1.15 },
 
-  uResolution: { value: new THREE.Vector2(renderer.domElement.width, renderer.domElement.height) },
+  uResolution: { value: new THREE.Vector2() },
   uCamPos: { value: new THREE.Vector3() },
   uCamRight: { value: new THREE.Vector3() },
   uCamUp: { value: new THREE.Vector3() },
@@ -46,14 +45,14 @@ const uniforms = {
   uFovY: { value: THREE.MathUtils.degToRad(camera.fov) },
 
   uTintA: { value: new THREE.Color(0.85, 1.05, 1.20) },
-  uTintB: { value: new THREE.Color(1.12, 0.9, 1.2) },
+  uTintB: { value: new THREE.Color(1.12, 0.90, 1.20) },
 };
 
 const material = new THREE.ShaderMaterial({
   uniforms,
   vertexShader: /* glsl */`
     varying vec2 vUv;
-    void main() {
+    void main () {
       vUv = uv;
       gl_Position = vec4(position.xy, 0.0, 1.0);
     }
@@ -176,6 +175,7 @@ vec3 calcNormal(vec3 p, float t){
   return normalize(e.xyy*map(p+e.xyy,t) + e.yyx*map(p+e.yyx,t) + e.yxy*map(p+e.yxy,t) + e.xxx*map(p+e.xxx,t));
 }
 
+// ---- Thin‑film interference (compact) ----
 float fresnelSchlick(float cosTheta, float F0){
   return F0 + (1.0 - F0) * pow(1.0 - cosTheta, 5.0);
 }
@@ -246,15 +246,13 @@ vec3 shade(vec3 p, vec3 n, vec3 rd, float tGeo, float tCol){
   vec3 ambBot = vec3(0.00, 0.00, 0.00);
   float h = clamp(p.y*0.25 + 0.5, 0.0, 1.0);
   col += mix(ambBot, ambTop, h);
-
   return col;
 }
 
 vec3 rayDirection(vec2 uv){
   float vy = tan(0.5 * uFovY);
   float vx = vy * (uResolution.x / uResolution.y);
-  vec3 dir = normalize(uv.x * vx * uCamRight + uv.y * vy * uCamUp + 1.0 * uCamForward);
-  return dir;
+  return normalize(uv.x * vx * uCamRight + uv.y * vy * uCamUp + 1.0 * uCamForward);
 }
 
 void main(){
@@ -302,7 +300,7 @@ void main(){
 const quad = new THREE.Mesh(quadGeo, material);
 scene.add(quad);
 
-// GUI
+// ---- GUI ----
 const gui = new GUI({ title: "Controls" });
 gui.add(uniforms.uSpeed, "value", 0.0, 3.0, 0.01).name("Speed");
 gui.add(uniforms.uRotSpeed, "value", 0.0, 2.0, 0.01).name("Rotation");
@@ -315,31 +313,36 @@ gui.add(uniforms.uFilmThickness, "value", 200.0, 800.0, 1).name("Film Thickness 
 gui.add(uniforms.uColorDelay, "value", 0.0, 1.2, 0.01).name("Color Delay");
 gui.add(uniforms.uExposure, "value", 0.5, 2.0, 0.01).name("Exposure");
 
-// Resize
+// ---- Resize & camera basis ----
+function updateResolutionUniform() {
+  const dpr = renderer.getPixelRatio();
+  uniforms.uResolution.value.set(window.innerWidth * dpr, window.innerHeight * dpr);
+}
+
 function onResize(){
-  const w = window.innerWidth, h = window.innerHeight;
-  renderer.setSize(w, h);
-  camera.aspect = w / h;
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
-  uniforms.uResolution.value.set(renderer.domElement.width, renderer.domElement.height);
   uniforms.uFovY.value = THREE.MathUtils.degToRad(camera.fov);
+  updateResolutionUniform();
 }
 window.addEventListener("resize", onResize);
+updateResolutionUniform();
 
-// Per-frame camera basis -> shader
 function updateCameraBasis(){
-  const m = camera.matrixWorld;
-  const right = new THREE.Vector3();
-  const up    = new THREE.Vector3();
-  const fwd   = new THREE.Vector3();
-  m.extractBasis(right, up, fwd);
+  camera.updateMatrixWorld(true);
+  const forward = new THREE.Vector3();
+  camera.getWorldDirection(forward);      // correct forward (towards -Z in local)
+  const right = new THREE.Vector3(1,0,0).applyQuaternion(camera.quaternion).normalize();
+  const up    = new THREE.Vector3(0,1,0).applyQuaternion(camera.quaternion).normalize();
+
   uniforms.uCamRight.value.copy(right);
   uniforms.uCamUp.value.copy(up);
-  uniforms.uCamForward.value.copy(fwd);
+  uniforms.uCamForward.value.copy(forward);
   uniforms.uCamPos.value.copy(camera.position);
 }
 
-// Render loop
+// ---- Render loop ----
 const clock = new THREE.Clock();
 function render(){
   uniforms.uTime.value = clock.getElapsedTime();
