@@ -1,7 +1,7 @@
-// Origata — Folding iridescent cube, 16 poses over 16 seconds.
-// - Continuous plane-fold + mild twist in the vertex shader (no cracks)
-// - Facet-aligned thin-film bands (emissive) + PBR glass (MeshPhysicalMaterial)
-// - Feedback + blur + RGBA delay (TouchDesigner recipe) confined to the silhouette
+// Iridescent folding cube — 16 poses over 16 seconds (seamless loop).
+// - Continuous plane-fold + mild twist (no cracks)
+// - Facet-aligned thin-film bands (emissive) + PBR glass
+// - Feedback + blur + RGBA delay (TouchDesigner recipe)
 // - Press 'C' to export a 4×4 contact sheet (1 s per tile, with substeps)
 
 import * as THREE from 'three';
@@ -16,13 +16,13 @@ renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
 renderer.setClearColor(0x000000, 1);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 1.05;
+renderer.toneMappingExposure = 0.95;          // lower exposure to avoid blowout
 renderer.physicallyCorrectLights = true;
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x000000);
 
-// Clean PMREM for transmission/clearcoat highlights
+// PMREM env for transmission/clearcoat highlights (subtle, not white)
 const pmrem = new THREE.PMREMGenerator(renderer);
 const envRT = pmrem.fromScene(new RoomEnvironment(renderer), 0.04);
 scene.environment = envRT.texture;
@@ -34,56 +34,54 @@ controls.enableDamping = true; controls.dampingFactor = 0.08; controls.rotateSpe
 
 /* ─────────── Parameters ─────────── */
 const P = {
-  cycleSeconds: 16,     // 16 frames / 16 seconds
+  cycleSeconds: 16,     // 16 frames / 16 seconds (seamless)
   speed: 1.0,
   autoRotate: true,
-  spin: 0.18,           // subtle; silhouettes change mostly due to folds
+  spin: 0.18,           // small; silhouettes change mainly from folds
 
-  // Optics (keep under control to avoid white blowout)
-  roughness: 0.08, transmission: 0.72, thickness: 0.85, ior: 1.36,
-  clearcoat: 1.0, clearcoatRoughness: 0.14, iridescence: 1.0, envIntensity: 1.25,
+  // Optics (kept moderate to prevent “white”)
+  roughness: 0.10, transmission: 0.62, thickness: 0.85, ior: 1.36,
+  clearcoat: 1.0, clearcoatRoughness: 0.14, iridescence: 0.8, envIntensity: 1.0,
 
   // Feedback chain (TouchDesigner-style)
-  fbDecay: 0.90, fbGain: 0.68, currGain: 0.90, // tuned to avoid “white” start
+  fbDecay: 0.90, fbGain: 0.60, currGain: 0.90,      // conservative defaults
   warpRotate: 0.010, warpZoom: 0.0020, warpJitter: 0.0012,
-  blurRadius: 1.6, maskHardness: 1.05,
-  dispersion: 0.0018,             // slight chromatic UV shift in final
+  blurRadius: 1.5, maskHardness: 1.05,
+  dispersion: 0.0016,
 
   sheetSize: 256
 };
 
-/* ─────────── Timeline poses (hand-tuned ranges to emulate your grid) ───────────
-   Each pose defines:
-   - twist: radians per unit height (small; most shape change is from folds)
-   - two plane folds (period, intensity, axis)
-   - thin-film bands (stripe freq/warp + film thickness base/amp)
-   - RGBA channel delays (like TouchDesigner Palette: rgbaDelay)
-   These 16 poses loop 1/second, producing your 4×4 progression.             */
-
+/* ─────────── Timeline poses ───────────
+   Sixteen “stances” arranged on a loop (no reverse/ping-pong).
+   Each pose defines (twist, two plane folds, stripe freq/warp, thin-film base/amp, RGBA delays).
+*/
 const V = (x,y,z) => new THREE.Vector3(x,y,z).normalize();
 const POSES = [
-  {twist:2.2,  f1:{p:1.30,i:1.20,n:V(1,0,0)},   f2:{p:0.95,i:0.85,n:V(0,1,0)},  sf:12.5, sw:0.54, base:425, amp:260, d:[1,3,5]},
-  {twist:2.6,  f1:{p:1.15,i:1.35,n:V(1,1,0)},   f2:{p:1.05,i:0.70,n:V(0,1,1)},  sf:14.0, sw:0.50, base:410, amp:300, d:[0,2,4]},
-  {twist:2.9,  f1:{p:1.10,i:1.45,n:V(1,0,1)},   f2:{p:0.90,i:0.90,n:V(1,-1,0)}, sf:15.5, sw:0.46, base:435, amp:250, d:[0,3,6]},
-  {twist:2.3,  f1:{p:1.40,i:0.95,n:V(0,1,0)},   f2:{p:1.10,i:1.10,n:V(1,0,-1)}, sf:11.8, sw:0.58, base:445, amp:280, d:[1,2,5]},
-  {twist:2.0,  f1:{p:1.25,i:1.25,n:V(1,1,0)},   f2:{p:0.85,i:0.80,n:V(0,1,-1)}, sf:12.0, sw:0.60, base:420, amp:320, d:[0,1,4]},
-  {twist:2.7,  f1:{p:1.05,i:1.35,n:V(1,0,0)},   f2:{p:1.20,i:0.70,n:V(0,0,1)},  sf:13.8, sw:0.50, base:430, amp:260, d:[2,4,6]},
-  {twist:2.4,  f1:{p:0.95,i:1.40,n:V(0,1,1)},   f2:{p:1.30,i:0.80,n:V(1,-1,0)}, sf:10.8, sw:0.62, base:440, amp:280, d:[1,4,7]},
-  {twist:2.1,  f1:{p:1.35,i:1.05,n:V(0,1,0)},   f2:{p:1.10,i:1.10,n:V(1,0,1)},  sf:12.6, sw:0.56, base:415, amp:300, d:[0,5,7]},
-  {twist:2.2,  f1:{p:1.25,i:1.15,n:V(1,0,-1)},  f2:{p:0.95,i:0.85,n:V(0,1,0)},  sf:13.2, sw:0.52, base:425, amp:260, d:[1,3,5]},
-  {twist:2.5,  f1:{p:1.10,i:1.40,n:V(1,1,0)},   f2:{p:1.05,i:0.75,n:V(0,1,1)},  sf:14.4, sw:0.48, base:410, amp:300, d:[0,2,4]},
-  {twist:2.8,  f1:{p:1.05,i:1.45,n:V(1,0,1)},   f2:{p:0.90,i:0.95,n:V(1,-1,0)}, sf:15.2, sw:0.44, base:435, amp:250, d:[0,3,6]},
-  {twist:2.3,  f1:{p:1.35,i:1.00,n:V(0,1,0)},   f2:{p:1.10,i:1.10,n:V(1,0,-1)}, sf:11.5, sw:0.58, base:445, amp:280, d:[1,2,5]},
-  {twist:2.0,  f1:{p:1.20,i:1.25,n:V(1,1,0)},   f2:{p:0.85,i:0.80,n:V(0,1,-1)}, sf:11.8, sw:0.60, base:420, amp:320, d:[0,1,4]},
-  {twist:2.6,  f1:{p:1.05,i:1.35,n:V(1,0,0)},   f2:{p:1.20,i:0.70,n:V(0,0,1)},  sf:13.6, sw:0.50, base:430, amp:260, d:[2,4,6]},
-  {twist:2.3,  f1:{p:0.95,i:1.40,n:V(0,1,1)},   f2:{p:1.25,i:0.80,n:V(1,-1,0)}, sf:10.6, sw:0.62, base:440, amp:280, d:[1,4,7]},
-  {twist:2.1,  f1:{p:1.35,i:1.05,n:V(0,1,0)},   f2:{p:1.10,i:1.10,n:V(1,0,1)},  sf:12.4, sw:0.56, base:415, amp:300, d:[0,5,7]}
+  {tw:2.2,f1:{p:1.30,i:1.20,n:V(1,0,0)}, f2:{p:0.95,i:0.85,n:V(0,1,0)},  sf:12.5, sw:0.54, base:425, amp:260, d:[1,3,5]},
+  {tw:2.6,f1:{p:1.15,i:1.35,n:V(1,1,0)}, f2:{p:1.05,i:0.70,n:V(0,1,1)},  sf:14.0, sw:0.50, base:410, amp:300, d:[0,2,4]},
+  {tw:2.9,f1:{p:1.10,i:1.45,n:V(1,0,1)}, f2:{p:0.90,i:0.90,n:V(1,-1,0)}, sf:15.5, sw:0.46, base:435, amp:250, d:[0,3,6]},
+  {tw:2.3,f1:{p:1.40,i:0.95,n:V(0,1,0)}, f2:{p:1.10,i:1.10,n:V(1,0,-1)}, sf:11.8, sw:0.58, base:445, amp:280, d:[1,2,5]},
+  {tw:2.0,f1:{p:1.25,i:1.25,n:V(1,1,0)}, f2:{p:0.85,i:0.80,n:V(0,1,-1)}, sf:12.0, sw:0.60, base:420, amp:320, d:[0,1,4]},
+  {tw:2.7,f1:{p:1.05,i:1.35,n:V(1,0,0)}, f2:{p:1.20,i:0.70,n:V(0,0,1)},  sf:13.8, sw:0.50, base:430, amp:260, d:[2,4,6]},
+  {tw:2.4,f1:{p:0.95,i:1.40,n:V(0,1,1)}, f2:{p:1.30,i:0.80,n:V(1,-1,0)}, sf:10.8, sw:0.62, base:440, amp:280, d:[1,4,7]},
+  {tw:2.1,f1:{p:1.35,i:1.05,n:V(0,1,0)}, f2:{p:1.10,i:1.10,n:V(1,0,1)},  sf:12.6, sw:0.56, base:415, amp:300, d:[0,5,7]},
+  {tw:2.2,f1:{p:1.25,i:1.15,n:V(1,0,-1)}, f2:{p:0.95,i:0.85,n:V(0,1,0)}, sf:13.2, sw:0.52, base:425, amp:260, d:[1,3,5]},
+  {tw:2.5,f1:{p:1.10,i:1.40,n:V(1,1,0)}, f2:{p:1.05,i:0.75,n:V(0,1,1)},  sf:14.4, sw:0.48, base:410, amp:300, d:[0,2,4]},
+  {tw:2.8,f1:{p:1.05,i:1.45,n:V(1,0,1)}, f2:{p:0.90,i:0.95,n:V(1,-1,0)}, sf:15.2, sw:0.44, base:435, amp:250, d:[0,3,6]},
+  {tw:2.3,f1:{p:1.35,i:1.00,n:V(0,1,0)}, f2:{p:1.10,i:1.10,n:V(1,0,-1)}, sf:11.5, sw:0.58, base:445, amp:280, d:[1,2,5]},
+  {tw:2.0,f1:{p:1.20,i:1.25,n:V(1,1,0)}, f2:{p:0.85,i:0.80,n:V(0,1,-1)}, sf:11.8, sw:0.60, base:420, amp:320, d:[0,1,4]},
+  {tw:2.6,f1:{p:1.05,i:1.35,n:V(1,0,0)}, f2:{p:1.20,i:0.70,n:V(0,0,1)},  sf:13.6, sw:0.50, base:430, amp:260, d:[2,4,6]},
+  {tw:2.3,f1:{p:0.95,i:1.40,n:V(0,1,1)}, f2:{p:1.25,i:0.80,n:V(1,-1,0)}, sf:10.6, sw:0.62, base:440, amp:280, d:[1,4,7]},
+  {tw:2.2,f1:{p:1.30,i:1.20,n:V(1,0,0)}, f2:{p:0.95,i:0.85,n:V(0,1,0)},  sf:12.5, sw:0.54, base:425, amp:260, d:[1,3,5]} // matches first for seamless wrap
 ];
 
 /* ─────────── Mesh + material ─────────── */
 const geo = new THREE.BoxGeometry(2.2, 2.2, 2.2, 96, 144, 96);
+
+// NOTE: base color is dark to keep headroom; color comes from thin-film emissive.
 const material = new THREE.MeshPhysicalMaterial({
-  color: 0xffffff,
+  color: 0x101010,
   metalness: 0.0,
   roughness: P.roughness,
   transmission: P.transmission,
@@ -99,7 +97,7 @@ const material = new THREE.MeshPhysicalMaterial({
 const cube = new THREE.Mesh(geo, material);
 scene.add(cube);
 
-// Mask mesh (same deformation) to confine feedback to silhouette
+// Mask mesh (same deformation) confines feedback to the silhouette
 const maskMat = new THREE.ShaderMaterial({
   uniforms: {
     uTwist:{value:2.2},
@@ -111,7 +109,7 @@ const maskMat = new THREE.ShaderMaterial({
     uniform float uF1P, uF1I; uniform vec3 uF1N;
     uniform float uF2P, uF2I; uniform vec3 uF2N;
 
-    // Triangular-wave plane fold: keeps surface continuous (no cracks)
+    // Triangular-wave plane fold: continuous (no cracks)
     vec3 foldSpace(vec3 p, vec3 n, float period, float intensity){
       float d = dot(p, n);
       float tri = abs(mod(d + period, 2.0*period) - period) - 0.5*period;
@@ -121,11 +119,9 @@ const maskMat = new THREE.ShaderMaterial({
 
     void main(){
       vec3 p = position;
-      // Mild twist about Y
       float a = uTwist * p.y;
       float s = sin(a), c = cos(a);
       p = vec3(c*p.x - s*p.z, p.y, s*p.x + c*p.z);
-      // Two folding planes
       p = foldSpace(p, normalize(uF1N), uF1P, uF1I);
       p = foldSpace(p, normalize(uF2N), uF2P, uF2I);
       gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
@@ -137,20 +133,20 @@ const maskMat = new THREE.ShaderMaterial({
 const cubeMask = new THREE.Mesh(geo, maskMat);
 const maskScene = new THREE.Scene(); maskScene.add(cubeMask);
 
-// Inject folds + thin-film into Physical material (safe patches)
+// Inject folds + thin-film into Physical material (onBeforeCompile)  :contentReference[oaicite:4]{index=4}
 material.onBeforeCompile = (sh) => {
   Object.assign(sh.uniforms, {
     uTwist:{value:2.2},
     uF1P:{value:1.2}, uF1I:{value:1.0}, uF1N:{value:new THREE.Vector3(1,0,0)},
     uF2P:{value:1.0}, uF2I:{value:0.8}, uF2N:{value:new THREE.Vector3(0,1,0)},
-    uStripeFreq:{value:12.5}, uStripeWarp:{value:0.5},
+    uStripeFreq:{value:12.5}, uStripeWarp:{value:0.5}, uTime:{value:0.0},
     uFilmBase:{value:430.0}, uFilmAmp:{value:280.0},
-    uVibrance:{value:1.30}, uPastel:{value:0.22}, uEdgeWarm:{value:0.25}
+    uVibrance:{value:1.80}, uPastel:{value:0.18}, uEdgeWarm:{value:0.22}
   });
 
   // Deform (twist + folds)
   sh.vertexShader = `
-    uniform float uTwist;
+    uniform float uTwist, uTime;
     uniform float uF1P, uF1I; uniform vec3 uF1N;
     uniform float uF2P, uF2I; uniform vec3 uF2N;
     varying vec3 vWorldPos; varying vec3 vNormalW;
@@ -170,12 +166,11 @@ material.onBeforeCompile = (sh) => {
       {
         vec3 p = transformed;
 
-        // Mild twist
         float a = uTwist * p.y;
         float s = sin(a), c = cos(a);
         p = vec3(c*p.x - s*p.z, p.y, s*p.x + c*p.z);
 
-        // Two plane folds
+        // Two plane folds (origata-style)
         p = foldSpace(p, normalize(uF1N), uF1P, uF1I);
         p = foldSpace(p, normalize(uF2N), uF2P, uF2I);
 
@@ -193,19 +188,26 @@ material.onBeforeCompile = (sh) => {
     `
   );
 
-  // Facet-aligned thin-film + a slight warm rim
+  // Facet-aligned thin-film + subtle warm rim  :contentReference[oaicite:5]{index=5}
   sh.fragmentShader = `
-    uniform float uStripeFreq, uStripeWarp, uFilmBase, uFilmAmp, uVibrance, uPastel, uEdgeWarm;
+    uniform float uStripeFreq, uStripeWarp, uFilmBase, uFilmAmp, uVibrance, uPastel, uEdgeWarm, uTime;
     varying vec3 vWorldPos; varying vec3 vNormalW;
 
     vec2 rot2(vec2 p, float a){ float c=cos(a), s=sin(a); return mat2(c,-s,s,c)*p; }
-    float stripeField(vec3 p, float freq, float warp){
+
+    // Object-anchored stripe field with animated warp (for evolving texture)
+    float stripeField(vec3 p, float freq, float warp, float t){
       vec2 q = p.xy + vec2(0.6*p.z, 0.35*p.x);
-      q = rot2(q, 0.785398); // 45°
-      float s1 = sin(q.x*freq + 0.7*q.y);
-      float s2 = sin((q.x+q.y)*freq*0.35 + 1.7*sin(q.x*0.6));
-      return 0.5 + 0.5 * mix(s1, s2, clamp(warp,0.0,1.0));
+      q = rot2(q, 0.785398 + 0.05*sin(t*0.4));
+      float s1 = sin(q.x*freq + 0.7*q.y + t*0.9);
+      float s2 = sin((q.x+q.y)*freq*0.35 + 1.7*sin(q.x*0.6 + t*0.7));
+      float s = mix(s1, s2, clamp(warp,0.0,1.0));
+      // Band-limit into crisp pastel stripes
+      float band = smoothstep(-0.25, 0.25, s) - smoothstep(0.25, 0.75, s);
+      return 0.5 + 0.5 * (s + 0.45*band);
     }
+
+    // Thin-film interference approximation (RGB phase)  :contentReference[oaicite:6]{index=6}
     vec3 thinFilm(float ndv, float d_nm, float n2){
       float n1=1.0, n3=1.50;
       float sin2=max(0.0, 1.0-ndv*ndv);
@@ -231,11 +233,14 @@ material.onBeforeCompile = (sh) => {
         vec3 V = normalize(cameraPosition - vWorldPos);
         float ndv = clamp(dot(N,V), 0.0, 1.0);
 
-        float f = stripeField(vWorldPos*0.7 + N*0.25, uStripeFreq, uStripeWarp);
+        float f = stripeField(vWorldPos*0.7 + N*0.25, uStripeFreq, uStripeWarp, uTime);
         float d_nm = uFilmBase + uFilmAmp * (f - 0.5) * 2.0;
         vec3 filmRGB = thinFilm(ndv, d_nm, 1.35);
+
+        // Pastelize and boost (texture should clearly read)
         filmRGB = mix(filmRGB, vec3(1.0), clamp(uPastel, 0.0, 1.0));
 
+        // Warm rim like the orange edges in your sheet
         float rim = pow(1.0 - ndv, 3.0);
         vec3 warm = vec3(1.0, 0.56, 0.35) * uEdgeWarm * rim;
 
@@ -249,7 +254,7 @@ material.onBeforeCompile = (sh) => {
 material.needsUpdate = true;
 
 /* ─────────── Post chain (Feedback + Blur + RGBA Delay) ───────────
-   Mirrors TouchDesigner’s Feedback TOP + rgbaDelay; confined to the shape.  */
+   Mirrors TouchDesigner’s Feedback TOP + rgbaDelay; confined to the shape.  :contentReference[oaicite:7]{index=7} */
 const postScene = new THREE.Scene();
 const postCam   = new THREE.OrthographicCamera(-1,1,1,-1,0,1);
 const quad      = new THREE.Mesh(new THREE.PlaneGeometry(2,2), new THREE.MeshBasicMaterial({color:0xffffff}));
@@ -269,7 +274,7 @@ const noiseGLSL = /* glsl */`
   }
 `;
 
-// Warp previous frame
+// Warp previous frame (rotate/zoom/jitter)
 const warpMat = new THREE.ShaderMaterial({
   vertexShader: fsVS,
   fragmentShader: /* glsl */`
@@ -284,7 +289,7 @@ const warpMat = new THREE.ShaderMaterial({
   uniforms: { tPrev:{value:null}, uRot:{value:0}, uZoom:{value:0}, uJitter:{value:0}, uTime:{value:0} }
 });
 
-// Composite with current frame (masked), gently (avoid white blowout)
+// Composite with current frame (masked), clamped to prevent blowout
 const compositeMat = new THREE.ShaderMaterial({
   vertexShader: fsVS,
   fragmentShader: /* glsl */`
@@ -294,7 +299,6 @@ const compositeMat = new THREE.ShaderMaterial({
       vec4 fb = texture2D(tWarped, vUv) * uDecay * uFbGain;
       vec4 cur= texture2D(tCurr,   vUv) * uCurrGain;
       float m = pow(texture2D(tMask, vUv).r, uHard);
-      // Blend like TD feedback: add but damped; clamp to prevent blowout
       gl_FragColor = clamp(m * fb + cur, 0.0, 1.0);
     }
   `,
@@ -304,7 +308,7 @@ const compositeMat = new THREE.ShaderMaterial({
   }
 });
 
-// Separable blur (H/V) — WebGL1-safe (texel size provided)
+// Separable blur (H/V)
 const blurMat = new THREE.ShaderMaterial({
   vertexShader: fsVS,
   fragmentShader: /* glsl */`
@@ -319,13 +323,13 @@ const blurMat = new THREE.ShaderMaterial({
   uniforms: { tInput:{value:null}, uTexel:{value:new THREE.Vector2(1/Math.max(2,W),1/Math.max(2,H))}, uDir:{value:new THREE.Vector2(1,0)}, uRadius:{value:P.blurRadius} }
 });
 
-// Copy to history slot
+// Copy to history
 const copyMat = new THREE.ShaderMaterial({
   vertexShader: fsVS, fragmentShader: /* glsl */`varying vec2 vUv; uniform sampler2D tInput; void main(){ gl_FragColor=texture2D(tInput,vUv);} `,
   uniforms:{ tInput:{value:null} }
 });
 
-// Final RGBA delay (per channel) + slight dispersion
+// Final RGBA delay (per channel) + slight dispersion  :contentReference[oaicite:8]{index=8}
 const finalMat = new THREE.ShaderMaterial({
   vertexShader: fsVS,
   fragmentShader: /* glsl */`
@@ -346,7 +350,7 @@ const finalMat = new THREE.ShaderMaterial({
       float g=texture2D(t0,ug).g*wG[0]+texture2D(t1,ug).g*wG[1]+texture2D(t2,ug).g*wG[2]+texture2D(t3,ug).g*wG[3]+
               texture2D(t4,ug).g*wG[4]+texture2D(t5,ug).g*wG[5]+texture2D(t6,ug).g*wG[6]+texture2D(t7,ug).g*wG[7];
 
-      float b=texture2D(t0,ub).b*wB[0]+texture2D(t1,ub).b*wB[1]+texture2D(t2,ub).b+wB[2]+texture2D(t3,ub).b*wB[3]+
+      float b=texture2D(t0,ub).b*wB[0]+texture2D(t1,ub).b*wB[1]+texture2D(t2,ub).b*wB[2]+texture2D(t3,ub).b*wB[3]+
               texture2D(t4,ub).b*wB[4]+texture2D(t5,ub).b*wB[5]+texture2D(t6,ub).b*wB[6]+texture2D(t7,ub).b*wB[7];
 
       gl_FragColor=vec4(r,g,b,1.0);
@@ -412,18 +416,19 @@ function setDelays(r,g,b){
   R[r]=1; G[g]=1; B[b]=1;
   finalMat.uniforms.wR.value=R; finalMat.uniforms.wG.value=G; finalMat.uniforms.wB.value=B;
 }
-function applyPose(p){
+function applyPose(p, time){
   const sh=material.userData.shader; if(!sh) return;
-  sh.uniforms.uTwist.value=p.twist;
+  sh.uniforms.uTwist.value=p.tw;
   sh.uniforms.uF1P.value=p.f1.p; sh.uniforms.uF1I.value=p.f1.i; sh.uniforms.uF1N.value.copy(p.f1.n);
   sh.uniforms.uF2P.value=p.f2.p; sh.uniforms.uF2I.value=p.f2.i; sh.uniforms.uF2N.value.copy(p.f2.n);
   sh.uniforms.uStripeFreq.value=p.sf; sh.uniforms.uStripeWarp.value=p.sw; sh.uniforms.uFilmBase.value=p.base; sh.uniforms.uFilmAmp.value=p.amp;
-  maskMat.uniforms.uTwist.value=p.twist;
+  sh.uniforms.uTime.value=time;
+
+  maskMat.uniforms.uTwist.value=p.tw;
   maskMat.uniforms.uF1P.value=p.f1.p; maskMat.uniforms.uF1I.value=p.f1.i; maskMat.uniforms.uF1N.value.copy(p.f1.n);
   maskMat.uniforms.uF2P.value=p.f2.p; maskMat.uniforms.uF2I.value=p.f2.i; maskMat.uniforms.uF2N.value.copy(p.f2.n);
+
   setDelays(p.d[0], p.d[1], p.d[2]);
-  // Gentle auto-rotate; silhouettes mainly from folds
-  cube.rotation.y += P.autoRotate ? P.spin * 0.016 : 0.0;
 }
 
 /* ─────────── Simulation / Feedback ─────────── */
@@ -431,34 +436,30 @@ let simTime=0;
 function step(dt){
   simTime += dt * P.speed;
 
+  // 16-second seamless loop — never reverses (no ping-pong)
   const T=P.cycleSeconds, t=simTime%T, i=Math.floor(t), u=t-i;
-  // Smoothstep for smooth morph between consecutive poses
   const s=u*u*(3.0-2.0*u);
   const A=POSES[i], B=POSES[(i+1)%POSES.length];
   const lerp=(a,b)=>a+(b-a)*s;
   const axisLerp=(a,b)=>new THREE.Vector3().copy(a).normalize().lerp(b.clone().normalize(), s).normalize();
   const poseNow={
-    twist:lerp(A.twist,B.twist),
+    tw: lerp(A.tw,B.tw),
     f1:{p:lerp(A.f1.p,B.f1.p), i:lerp(A.f1.i,B.f1.i), n:axisLerp(A.f1.n,B.f1.n)},
     f2:{p:lerp(A.f2.p,B.f2.p), i:lerp(A.f2.i,B.f2.i), n:axisLerp(A.f2.n,B.f2.n)},
     sf:lerp(A.sf,B.sf), sw:lerp(A.sw,B.sw), base:lerp(A.base,B.base), amp:lerp(A.amp,B.amp),
     d:(u<0.5?A.d:B.d)
   };
-  applyPose(poseNow);
+  applyPose(poseNow, simTime);
 
-  // Render 3D scene
-  renderer.setRenderTarget(rtScene);
-  renderer.render(scene, camera);
-  renderer.setRenderTarget(null);
+  // Small base rotation (most motion is from folds)
+  if (P.autoRotate) cube.rotation.y += P.spin * dt;
 
-  // Render mask (same deformations)
+  // Render scene & mask
+  renderer.setRenderTarget(rtScene); renderer.render(scene, camera); renderer.setRenderTarget(null);
   cubeMask.rotation.copy(cube.rotation);
-  renderer.setRenderTarget(rtMask);
-  renderer.clear();
-  renderer.render(maskScene, camera);
-  renderer.setRenderTarget(null);
+  renderer.setRenderTarget(rtMask); renderer.clear(); renderer.render(maskScene, camera); renderer.setRenderTarget(null);
 
-  // Feedback warp → composite → blur → history → RGBA delay compose
+  // Feedback -> warp -> composite -> blur -> history -> RGBA delay
   warpMat.uniforms.tPrev.value=rtA.texture; warpMat.uniforms.uRot.value=P.warpRotate; warpMat.uniforms.uZoom.value=P.warpZoom;
   warpMat.uniforms.uJitter.value=P.warpJitter; warpMat.uniforms.uTime.value=simTime;
   quad.material=warpMat; renderer.setRenderTarget(rtTemp); renderer.render(postScene, postCam);
@@ -484,11 +485,10 @@ function step(dt){
   for(let k=0;k<HISTORY;k++){ const slot=(histIndex-1-k+HISTORY)%HISTORY; finalMat.uniforms['t'+k].value=history[slot].texture; }
   finalMat.uniforms.uDispersion.value=P.dispersion;
 
-  // Final composite to screen
-  quad.material=finalMat;
-  renderer.setRenderTarget(null); renderer.render(postScene, postCam);
+  // Final to screen
+  quad.material=finalMat; renderer.setRenderTarget(null); renderer.render(postScene, postCam);
 
-  // Ping-pong
+  // Ping-pong accumulators (internal buffer management; animation itself is not ping‑pong)
   const tmp=rtA; rtA=rtB; rtB=tmp;
 
   controls.update();
@@ -498,8 +498,8 @@ function animate(){ const dt=clock.getDelta(); step(dt); requestAnimationFrame(a
 requestAnimationFrame(animate);
 
 /* ─────────── Contact sheet (press 'C') ───────────
-   Captures exactly 16 frames, stepping the simulation by 1 s each (with
-   substeps for feedback). Produces a 4×4 PNG similar to your reference.     */
+   Captures exactly 16 frames, stepping the simulation forward by 1 s each (with
+   substeps so feedback evolves between samples). */
 window.addEventListener('keydown', async (e)=>{
   if(e.key.toLowerCase()!=='c') return;
   const rows=4, cols=4, pad=8, cw=P.sheetSize, ch=P.sheetSize;
@@ -507,7 +507,7 @@ window.addEventListener('keydown', async (e)=>{
   const off=document.createElement('canvas'); off.width=W2; off.height=H2;
   const ctx=off.getContext('2d'); ctx.imageSmoothingEnabled=true; ctx.fillStyle='#000'; ctx.fillRect(0,0,W2,H2);
 
-  const secondsPerSample=1.0, substeps=60; // ~60 fps worth of evolution per second
+  const secondsPerSample=1.0, substeps=60;
   const bitmaps=[];
   for(let n=0;n<rows*cols;n++){
     for(let s=0;s<substeps;s++) step(secondsPerSample/substeps);
