@@ -1,38 +1,57 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Origata — Folding Iridescent Cube (mesh folds + feedback)</title>
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
+    />
+    <title>Folding Contact Sheet — three.js</title>
+    <style>
+      html, body {
+        height: 100%;
+        margin: 0;
+        background: #000;
+        color: #ddd;
+        font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+        overflow: hidden; /* canvas takes full screen, gui overlays on the right */
+      }
+      #app {
+        position: fixed;
+        inset: 0; /* full-bleed canvas */
+      }
+      /* Keep the GUI on the right and minimal */
+      .lil-gui.root {
+        position: fixed !important;
+        right: 0;
+        top: 0;
+        max-height: 100vh;
+        overflow: auto;
+        z-index: 10;
+      }
+      .info {
+        position: fixed;
+        left: 12px;
+        bottom: 12px;
+        color: #aaa;
+        font-size: 12px;
+        line-height: 1.4;
+        z-index: 5;
+        pointer-events: none;
+        text-shadow: 0 1px 2px rgba(0,0,0,.6);
+      }
+      a { color: #8ad; text-decoration: none; }
+      a:hover { text-decoration: underline; }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <div class="info">
+      Drag = orbit · Wheel = zoom · Shift+Drag = pan<br/>
+      16 panels show one shape at different time offsets.
+    </div>
 
-  <!-- One Three.js; addons resolve to this version -->
-  <script type="importmap">
-  {
-    "imports": {
-      "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
-      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
-    }
-  }
-  </script>
-
-  <style>
-    html, body { margin:0; height:100%; background:#000; color:#ddd; overflow:hidden;
-      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; }
-    #app { position: fixed; inset: 0; }
-    canvas#scene { width:100%; height:100%; display:block; background:#000; }
-    /* Minimal, right-side controls */
-    .lil-gui.root {
-      position: fixed !important; right: 0 !important; top: 0 !important; bottom: 0 !important;
-      width: 300px !important; max-height: 100vh !important; overflow-y: auto !important;
-      background: rgba(10,10,10,0.92) !important; border-left: 1px solid rgba(255,255,255,0.08) !important;
-      z-index: 10; backdrop-filter: blur(6px);
-    }
-    .hint { position: fixed; left: 12px; bottom: 10px; color: #8a8a8a; font-size: 12px; pointer-events:none; user-select:none; }
-  </style>
-</head>
-<body>
-  <div id="app"><canvas id="scene"></canvas></div>
-  <div class="hint">Drag to orbit • Scroll to zoom • Press <b>C</b> for 4×4 contact sheet</div>
-  <script type="module" src="./main.js"></script>
-</body>
+    <!-- Main module -->
+    <script type="module" src="./main.js"></script>
+  </body>
 </html>
