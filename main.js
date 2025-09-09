@@ -1,191 +1,352 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import GUI from 'lil-gui';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+import { GUI } from 'three/addons/libs/lil-gui.module.min.js';
 
-// --- Scene Setup ---
-const scene = new THREE.Scene();
-const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
-camera.position.z = 3;
+/* ----------------------------------------------------------------------------
+   Scene / Renderer
+---------------------------------------------------------------------------- */
+const container = document.getElementById('viewport');
 
-const renderer = new THREE.WebGLRenderer({
-    canvas: document.querySelector('#webgl'),
-    antialias: true
-});
-renderer.setSize(window.innerWidth, window.innerHeight);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(container.clientWidth, container.clientHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.0;
+container.appendChild(renderer.domElement);
 
-// --- Controls ---
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x000000);
+
+const camera = new THREE.PerspectiveCamera(45, container.clientWidth / container.clientHeight, 0.1, 100);
+camera.position.set(3.5, 2.2, 4.5);
+
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
-controls.autoRotate = true;
-controls.autoRotateSpeed = 0.5;
+controls.dampingFactor = 0.06;
 
-// --- Load Texture ---
-const textureLoader = new THREE.TextureLoader();
-const holographicTexture = textureLoader.load(
-    'https://upload.wikimedia.org/wikipedia/commons/8/82/Holographic_texture_02.jpg',
-    (texture) => {
-        texture.wrapS = THREE.RepeatWrapping;
-        texture.wrapT = THREE.RepeatWrapping;
-    }
-);
+/* ----------------------------------------------------------------------------
+   Lighting + Environment (PMREM + RoomEnvironment)
+   Ensures PBR correctness and nice specular response on thin‑film material.
+   (See PMREM docs and usage of RoomEnvironment.) 
+---------------------------------------------------------------------------- */
+const pmrem = new THREE.PMREMGenerator(renderer);
+const envScene = new RoomEnvironment();
+const envMap = pmrem.fromScene(envScene).texture; // PBR-friendly env map
+scene.environment = envMap; // recommended way for Physical/Standard materials
 
-// --- lil-gui Setup ---
-const gui = new GUI();
-const settings = {
-    speed: 0.2,
-    distortion: 0.5,
-    fresnel: 1.8
+/* ----------------------------------------------------------------------------
+   Parameters (GUI on the right)
+---------------------------------------------------------------------------- */
+const params = {
+  // Animation / folding
+  play: true,
+  speed: 0.26,
+  maxAngleDeg: 82.0,
+  stagger: 0.55,        // time offset between folds
+  autoRotate: true,
+  // Material / texture feel
+  iridescence: 1.0,
+  iriIOR: 1.3,
+  iriMinNm: 120.0,
+  iriMaxNm: 650.0,
+  transmission: 0.06,
+  thickness: 0.55,
+  roughness: 0.08,
+  clearcoat: 1.0,
+  clearcoatRoughness: 0.22,
+  envIntensity: 1.25,
+  stripeScale: 22.0,
+  stripeStrength: 0.55,
+  rainbowShift: 0.0,
+  // Stripe dual set (slight moiré)
+  stripeMix: 0.5
 };
 
-// --- Shaders ---
-const vertexShader = `
-    uniform float uTime;
-    uniform float uSpeed;
-    uniform float uDistortion;
+/* ----------------------------------------------------------------------------
+   Geometry: low‑poly base (octahedron) – faceted look, DoubleSide to preserve
+   the “fold onto itself” readability when parts overlap.
+---------------------------------------------------------------------------- */
+const baseRadius = 1.35;
+const geo = new THREE.OctahedronGeometry(baseRadius, 0); // 8 faces, 6 unique vertices
+geo.computeVertexNormals();
+// keep a copy for deformation baseline
+const basePositions = geo.attributes.position.array.slice();
 
-    varying vec2 vUv;
-    varying vec3 vNormal;
-    varying vec3 vViewPosition;
-
-    // Simplex 3D Noise for smooth, organic procedural values
-    // Author: Ashima Arts
-    vec3 mod289(vec3 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
-    vec4 mod289(vec4 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
-    vec4 permute(vec4 x) { return mod289(((x*34.0)+1.0)*x); }
-    vec4 taylorInvSqrt(vec4 r) { return 1.79284291400159 - 0.85373472095314 * r; }
-
-    float snoise(vec3 v) {
-        const vec2 C = vec2(1.0/6.0, 1.0/3.0);
-        const vec4 D = vec4(0.0, 0.5, 1.0, 2.0);
-        vec3 i  = floor(v + dot(v, C.yyy));
-        vec3 x0 = v - i + dot(i, C.xxx);
-        vec3 g = step(x0.yzx, x0.xyz);
-        vec3 l = 1.0 - g;
-        vec3 i1 = min(g.xyz, l.zxy);
-        vec3 i2 = max(g.xyz, l.zxy);
-        vec3 x1 = x0 - i1 + C.xxx;
-        vec3 x2 = x0 - i2 + C.yyy;
-        vec3 x3 = x0 - D.yyy;
-        i = mod289(i);
-        vec4 p = permute(permute(permute(
-            i.z + vec4(0.0, i1.z, i2.z, 1.0))
-            + i.y + vec4(0.0, i1.y, i2.y, 1.0))
-            + i.x + vec4(0.0, i1.x, i2.x, 1.0));
-        float n_ = 0.142857142857;
-        vec3 ns = n_ * D.wyz - D.xzx;
-        vec4 j = p - 49.0 * floor(p * ns.z * ns.z);
-        vec4 x_ = floor(j * ns.z);
-        vec4 y_ = floor(j - 7.0 * x_);
-        vec4 x = x_ * ns.x + ns.yyyy;
-        vec4 y = y_ * ns.x + ns.yyyy;
-        vec4 h = 1.0 - abs(x) - abs(y);
-        vec4 b0 = vec4(x.xy, y.xy);
-        vec4 b1 = vec4(x.zw, y.zw);
-        vec4 s0 = floor(b0)*2.0 + 1.0;
-        vec4 s1 = floor(b1)*2.0 + 1.0;
-        vec4 sh = -step(h, vec4(0.0));
-        vec4 a0 = b0.xzyw + s0.xzyw*sh.xxyy;
-        vec4 a1 = b1.xzyw + s1.xzyw*sh.zzww;
-        vec3 p0 = vec3(a0.xy,h.x);
-        vec3 p1 = vec3(a0.zw,h.y);
-        vec3 p2 = vec3(a1.xy,h.z);
-        vec3 p3 = vec3(a1.zw,h.w);
-        vec4 norm = taylorInvSqrt(vec4(dot(p0,p0), dot(p1,p1), dot(p2,p2), dot(p3,p3)));
-        p0 *= norm.x;
-        p1 *= norm.y;
-        p2 *= norm.z;
-        p3 *= norm.w;
-        vec4 m = max(0.6 - vec4(dot(x0,x0), dot(x1,x1), dot(x2,x2), dot(x3,x3)), 0.0);
-        m = m * m;
-        return 42.0 * dot(m*m, vec4(dot(p0,x0), dot(p1,x1), dot(p2,x2), dot(p3,x3)));
-    }
-
-    void main() {
-        vUv = uv;
-        vNormal = normal;
-        
-        // --- Vertex Displacement ---
-        float noiseTime = uTime * uSpeed;
-        float largeFolds = snoise(position * 0.5 + noiseTime);
-        float smallFolds = snoise(position * 2.5 + noiseTime * 1.5);
-        float displacement = (largeFolds * 0.7 + smallFolds * 0.3) * uDistortion;
-        vec3 newPosition = position + normal * displacement;
-
-        vec4 modelViewPosition = modelViewMatrix * vec4(newPosition, 1.0);
-        vViewPosition = -modelViewPosition.xyz;
-        gl_Position = projectionMatrix * modelViewPosition;
-    }
-`;
-
-const fragmentShader = `
-    uniform sampler2D uTexture;
-    uniform float uFresnelPower;
-
-    varying vec2 vUv;
-    varying vec3 vNormal;
-    varying vec3 vViewPosition;
-
-    void main() {
-        // Base Color from Texture
-        vec4 textureColor = texture2D(uTexture, vUv * 2.0);
-        
-        // Fresnel Effect for iridescent highlights
-        vec3 viewDirection = normalize(vViewPosition);
-        float fresnel = 1.0 - dot(normalize(vNormal), viewDirection);
-        fresnel = pow(fresnel, uFresnelPower);
-
-        // Final Color
-        vec3 finalColor = textureColor.rgb + fresnel;
-        gl_FragColor = vec4(finalColor, 1.0);
-    }
-`;
-
-// --- Geometry and Material ---
-const geometry = new THREE.IcosahedronGeometry(1.2, 15);
-const material = new THREE.ShaderMaterial({
-    vertexShader,
-    fragmentShader,
-    uniforms: {
-        uTime: { value: 0 },
-        uSpeed: { value: settings.speed },
-        uDistortion: { value: settings.distortion },
-        uFresnelPower: { value: settings.fresnel },
-        uTexture: { value: holographicTexture }
-    },
+/* ----------------------------------------------------------------------------
+   Material: iridescent physical with a small diffraction‑stripe overlay
+   injected via onBeforeCompile (supported way to extend stock materials).
+   References on iridescence and extending materials cited in the answer.
+---------------------------------------------------------------------------- */
+const material = new THREE.MeshPhysicalMaterial({
+  color: 0xffffff,
+  side: THREE.DoubleSide,
+  flatShading: true,                      // crisp facets
+  metalness: 0.1,
+  roughness: params.roughness,
+  clearcoat: params.clearcoat,
+  clearcoatRoughness: params.clearcoatRoughness,
+  envMapIntensity: params.envIntensity,
+  ior: 1.5,
+  transmission: params.transmission,      // tiny bit of translucency
+  thickness: params.thickness,
+  attenuationColor: new THREE.Color(0xffffff),
+  attenuationDistance: 1.2,
+  iridescence: params.iridescence,
+  iridescenceIOR: params.iriIOR,
+  iridescenceThicknessRange: [params.iriMinNm, params.iriMaxNm]
 });
 
-const mesh = new THREE.Mesh(geometry, material);
+// Inject a diffractive grating style overlay using onBeforeCompile.
+material.onBeforeCompile = (shader) => {
+  shader.uniforms.uTime = { value: 0.0 };
+  shader.uniforms.uStripeScale = { value: params.stripeScale };
+  shader.uniforms.uStripeStrength = { value: params.stripeStrength };
+  shader.uniforms.uRainbowShift = { value: params.rainbowShift };
+  shader.uniforms.uStripeMix = { value: params.stripeMix };
+
+  shader.vertexShader = `
+    varying vec3 vWorldPos;
+    varying vec3 vWorldNormal;
+  ` + shader.vertexShader
+    .replace('#include <beginnormal_vertex>', `
+      #include <beginnormal_vertex>
+      // world-space normal (approx; modelMatrix is ok unless extreme non-uniform scaling)
+      vWorldNormal = normalize( mat3( modelMatrix ) * objectNormal );
+    `)
+    .replace('#include <begin_vertex>', `
+      #include <begin_vertex>
+      vWorldPos = ( modelMatrix * vec4( transformed, 1.0 ) ).xyz;
+    `);
+
+  shader.fragmentShader = `
+    uniform float uTime;
+    uniform float uStripeScale;
+    uniform float uStripeStrength;
+    uniform float uRainbowShift;
+    uniform float uStripeMix;
+    varying vec3 vWorldPos;
+    varying vec3 vWorldNormal;
+
+    // Cheap spectral-ish ramp (rainbow from 0..1)
+    vec3 spectral(float x){
+      x = clamp(fract(x), 0.0, 1.0);
+      return clamp(vec3(
+        abs(x*6.0-3.0)-1.0,
+        2.0-abs(x*6.0-2.0),
+        2.0-abs(x*6.0-4.0)
+      ), 0.0, 1.0);
+    }
+  ` + shader.fragmentShader
+    .replace('#include <begin_fragment>', `
+      #include <begin_fragment>
+      // Build a face-local tangent basis from the world normal
+      vec3 N = normalize(vWorldNormal);
+      vec3 helper = (abs(N.y) > 0.98) ? vec3(1.0,0.0,0.0) : vec3(0.0,1.0,0.0);
+      vec3 T = normalize(cross(N, helper)); // tangent
+      vec3 B = normalize(cross(N, T));      // bitangent
+
+      // Two stripe sets at different frequencies -> diffractive moiré feel
+      float s1 = 0.5 + 0.5 * sin( dot(vWorldPos, T) * uStripeScale + uRainbowShift + uTime*0.6 );
+      float s2 = 0.5 + 0.5 * sin( dot(vWorldPos, B) * (uStripeScale * 0.63) - (uRainbowShift*1.37) + uTime*0.37 );
+      float bands = mix(s1, s2, uStripeMix);
+      vec3 rainbow = spectral(bands);
+
+      // Mix rainbow bands into diffuseColor before lighting completes
+      diffuseColor.rgb = mix(diffuseColor.rgb, diffuseColor.rgb + rainbow, uStripeStrength);
+    `);
+
+  material.userData.shader = shader;
+};
+
+const mesh = new THREE.Mesh(geo, material);
 scene.add(mesh);
 
-// --- UI Listeners via lil-gui ---
-gui.add(settings, 'speed', 0, 1, 0.01).name('Animation Speed').onChange(value => {
-    material.uniforms.uSpeed.value = value;
-});
-gui.add(settings, 'distortion', 0, 2, 0.01).name('Distortion Amount').onChange(value => {
-    material.uniforms.uDistortion.value = value;
-});
-gui.add(settings, 'fresnel', 0.1, 5.0, 0.1).name('Highlight Power').onChange(value => {
-    material.uniforms.uFresnelPower.value = value;
-});
+/* ----------------------------------------------------------------------------
+   Build fold “hinges” along explicit edges of the octahedron.
+   Each hinge rotates one half-space around an edge axis (line through two
+   vertices). Plane selection ensures vertices ON the hinge stay fixed, so the
+   mesh remains cohesive (no explosion).
+---------------------------------------------------------------------------- */
 
-// --- Handle Window Resize ---
-window.addEventListener('resize', () => {
-    camera.aspect = window.innerWidth / window.innerHeight;
-    camera.updateProjectionMatrix();
-    renderer.setSize(window.innerWidth, window.innerHeight);
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-});
+// Extract 6 unique vertices of the octahedron from the geometry (non-indexed)
+function uniqueVertsFromGeometry(g) {
+  const pos = g.attributes.position.array;
+  const map = new Map();
+  const verts = [];
+  for (let i = 0; i < pos.length; i += 3) {
+    const x = +pos[i].toFixed(5), y = +pos[i + 1].toFixed(5), z = +pos[i + 2].toFixed(5);
+    const key = `${x},${y},${z}`;
+    if (!map.has(key)) {
+      map.set(key, verts.length);
+      verts.push(new THREE.Vector3(x, y, z));
+    }
+  }
+  return verts;
+}
+const uniq = uniqueVertsFromGeometry(geo);
 
-// --- Animation Loop ---
-const clock = new THREE.Clock();
+// Identify top, bottom, and 4 equator vertices
+let top = uniq[0], bottom = uniq[0];
+for (const v of uniq) {
+  if (v.y > top.y) top = v;
+  if (v.y < bottom.y) bottom = v;
+}
+const equator = uniq.filter(v => v !== top && v !== bottom)
+  .sort((a, b) => Math.atan2(a.z, a.x) - Math.atan2(b.z, b.x)); // order around Y
 
-function animate() {
-    const elapsedTime = clock.getElapsedTime();
-    material.uniforms.uTime.value = elapsedTime;
-    controls.update();
-    renderer.render(scene, camera);
-    requestAnimationFrame(animate);
+// Define hinges: 4 from top→equator[i], 4 from bottom→equator[i]
+const hinges = [];
+const tmpV = new THREE.Vector3();
+for (let i = 0; i < 4; i++) {
+  const E = equator[i];
+  const Enext = equator[(i + 1) % 4];
+  // Axis along edge Top-E
+  const axisTop = E.clone().sub(top).normalize();
+  // The fold-separating plane contains the axis; its normal comes from cross(axis, faceNormal)
+  const faceNTop = new THREE.Vector3().crossVectors(
+    E.clone().sub(top),
+    Enext.clone().sub(top)
+  ).normalize();
+  const planeNTop = new THREE.Vector3().crossVectors(axisTop, faceNTop).normalize();
+
+  hinges.push({
+    origin: top.clone(),
+    axis: axisTop.clone(),
+    planeN: planeNTop.clone(),
+    phase: i * params.stagger,
+    sign: 1.0 // fold direction
+  });
+
+  // Bottom hinges mirror the idea
+  const axisBot = E.clone().sub(bottom).normalize();
+  const faceNBot = new THREE.Vector3().crossVectors(
+    Enext.clone().sub(bottom),
+    E.clone().sub(bottom)
+  ).normalize();
+  const planeNBot = new THREE.Vector3().crossVectors(axisBot, faceNBot).normalize();
+
+  hinges.push({
+    origin: bottom.clone(),
+    axis: axisBot.clone(),
+    planeN: planeNBot.clone(),
+    phase: (i + 0.5) * params.stagger, // interleave with top folds
+    sign: -1.0
+  });
 }
 
-animate();
+/* Rotation of a point around a line (Rodrigues formula) */
+const _a = new THREE.Vector3(), _r = new THREE.Vector3(), _p = new THREE.Vector3();
+function rotateAroundAxisLine(point, origin, axis, angle) {
+  _p.copy(point).sub(origin);
+  const cos = Math.cos(angle), sin = Math.sin(angle);
+  _a.copy(axis);
+  _r.copy(_p).multiplyScalar(cos)
+    .add(_a.clone().cross(_p).multiplyScalar(sin))
+    .add(_a.multiplyScalar(_a.dot(_p) * (1.0 - cos)));
+  return _r.add(origin);
+}
+
+/* Apply all hinges to the mesh geometry each frame */
+const posAttr = geo.attributes.position;
+const pos = posAttr.array;
+const basePos = basePositions; // immutable baseline
+
+const EPS = 1e-6;
+function applyFolds(t) {
+  const maxAngle = THREE.MathUtils.degToRad(params.maxAngleDeg);
+  for (let i = 0; i < pos.length; i += 3) {
+    // start from baseline
+    let vx = basePos[i], vy = basePos[i + 1], vz = basePos[i + 2];
+    _p.set(vx, vy, vz);
+
+    // sequentially apply hinge rotations
+    for (let h = 0; h < hinges.length; h++) {
+      const H = hinges[h];
+      // triangular/ping-pong timing with easing for the “delayed” fold feeling
+      const tt = (t * params.speed + H.phase);
+      const tri = Math.abs((tt % 2) - 1);     // 0..1..0
+      const eased = tri * tri * (3 - 2 * tri); // smoothstep
+      const angle = (eased - 0.5) * 2.0 * maxAngle * H.sign;
+
+      // Signed side of the splitting plane; points ON the axis/plane don't move
+      const side = (_p.clone().sub(H.origin)).dot(H.planeN);
+      if (side > EPS) {
+        _p.copy(rotateAroundAxisLine(_p, H.origin, H.axis, angle));
+      }
+    }
+
+    pos[i] = _p.x;
+    pos[i + 1] = _p.y;
+    pos[i + 2] = _p.z;
+  }
+  posAttr.needsUpdate = true;
+  geo.computeVertexNormals(); // keep normals coherent for flat shading
+}
+
+/* ----------------------------------------------------------------------------
+   GUI
+---------------------------------------------------------------------------- */
+const gui = new GUI({ container: document.getElementById('ui'), width: 280, title: 'Controls' });
+gui.add(params, 'play').name('Play/Pause');
+gui.add(params, 'autoRotate').name('Auto rotate');
+gui.add(params, 'speed', 0.02, 1.2, 0.01).name('Fold speed');
+gui.add(params, 'maxAngleDeg', 5, 140, 1).name('Fold amplitude (°)');
+gui.add(params, 'stagger', 0.0, 1.5, 0.01).name('Time offset');
+
+const fMat = gui.addFolder('Material');
+fMat.add(params, 'iridescence', 0.0, 1.0, 0.01).name('Iridescence').onChange(v => { material.iridescence = v; });
+fMat.add(params, 'iriIOR', 1.0, 2.0, 0.01).name('Iridescence IOR').onChange(v => { material.iridescenceIOR = v; });
+fMat.add(params, 'iriMinNm', 50, 500, 1).name('Iri min (nm)').onChange(() => { material.iridescenceThicknessRange = [params.iriMinNm, params.iriMaxNm]; });
+fMat.add(params, 'iriMaxNm', 200, 1200, 1).name('Iri max (nm)').onChange(() => { material.iridescenceThicknessRange = [params.iriMinNm, params.iriMaxNm]; });
+fMat.add(params, 'transmission', 0.0, 0.5, 0.01).name('Transmission').onChange(v => { material.transmission = v; });
+fMat.add(params, 'thickness', 0.05, 2.0, 0.01).name('Thickness').onChange(v => { material.thickness = v; });
+fMat.add(params, 'roughness', 0.0, 0.6, 0.001).name('Roughness').onChange(v => { material.roughness = v; });
+fMat.add(params, 'clearcoat', 0.0, 1.0, 0.01).name('Clearcoat').onChange(v => { material.clearcoat = v; });
+fMat.add(params, 'clearcoatRoughness', 0.0, 1.0, 0.01).name('ClearcoatRough').onChange(v => { material.clearcoatRoughness = v; });
+fMat.add(params, 'envIntensity', 0.1, 3.0, 0.01).name('Env Intensity').onChange(v => { material.envMapIntensity = v; });
+
+const fTex = gui.addFolder('Diffractive stripes');
+fTex.add(params, 'stripeScale', 2.0, 60.0, 0.1).name('Scale').onChange(v => { material.userData.shader && (material.userData.shader.uniforms.uStripeScale.value = v); });
+fTex.add(params, 'stripeStrength', 0.0, 1.0, 0.01).name('Strength').onChange(v => { material.userData.shader && (material.userData.shader.uniforms.uStripeStrength.value = v); });
+fTex.add(params, 'stripeMix', 0.0, 1.0, 0.01).name('Dual mix').onChange(v => { material.userData.shader && (material.userData.shader.uniforms.uStripeMix.value = v); });
+fTex.add(params, 'rainbowShift', -Math.PI, Math.PI, 0.01).name('Phase').onChange(v => { material.userData.shader && (material.userData.shader.uniforms.uRainbowShift.value = v); });
+
+/* ----------------------------------------------------------------------------
+   Resize / Input
+---------------------------------------------------------------------------- */
+window.addEventListener('resize', () => {
+  const w = container.clientWidth, h = container.clientHeight;
+  renderer.setSize(w, h);
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+});
+window.addEventListener('keydown', (e) => {
+  if (e.code === 'Space') params.play = !params.play;
+});
+
+/* ----------------------------------------------------------------------------
+   Animate
+---------------------------------------------------------------------------- */
+const clock = new THREE.Clock();
+
+function render() {
+  const t = clock.getElapsedTime();
+  if (params.play) applyFolds(t);
+
+  if (material.userData.shader) {
+    material.userData.shader.uniforms.uTime.value = t;
+    material.userData.shader.uniforms.uStripeScale.value = params.stripeScale;
+    material.userData.shader.uniforms.uStripeStrength.value = params.stripeStrength;
+    material.userData.shader.uniforms.uRainbowShift.value = params.rainbowShift;
+    material.userData.shader.uniforms.uStripeMix.value = params.stripeMix;
+  }
+
+  if (params.autoRotate) mesh.rotation.y += 0.0025;
+
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(render);
+}
+render();
