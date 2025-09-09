@@ -4,6 +4,17 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Iridescent Folding Crystal</title>
+
+  <!-- One and only one Three.js instance (pinned) -->
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+    }
+  }
+  </script>
+
   <style>
     :root { --bg: #000; }
     html, body {
@@ -54,6 +65,7 @@
     <canvas id="scene"></canvas>
   </div>
   <div class="hint">Drag to orbit • Scroll to zoom</div>
+
   <script type="module" src="./main.js"></script>
 </body>
 </html>
