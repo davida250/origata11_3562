@@ -1,5 +1,5 @@
 // Iridescent folding crystal — continuous folding (no separation),
-// vibrant thin‑film stripes plus real reflections & refraction (PBR).
+// vibrant thin‑film stripes + reflections & refraction (MeshPhysicalMaterial).
 
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
@@ -221,7 +221,7 @@ material.onBeforeCompile = (shader) => {
         vec3 p = transformed;
         float t = uTime * 0.5 + uSeed * 17.0;
 
-        // Smoothly animated fold normals (use vec3 weight for GLSL ES compatibility)
+        // Smoothly animated fold normals (vec3 weight for ES compatibility)
         vec3 n1 = normalize(mix(uFoldN1, vec3(sin(t*0.7), cos(t*0.9), sin(t*0.5)), vec3(0.35)));
         vec3 n2 = normalize(mix(uFoldN2, vec3(cos(t*0.6), sin(t*0.8), cos(t*0.4)), vec3(0.35)));
 
@@ -235,9 +235,9 @@ material.onBeforeCompile = (shader) => {
 
         transformed = p;
 
-        // World-space varyings (don’t rely on internal worldpos chunk order)
+        // World-space varyings (keep spaces consistent with cameraPosition)
         vWorldPos = (modelMatrix * vec4(transformed, 1.0)).xyz;
-        vNormalW  = normalize(mat3(normalMatrix) * gNormal);
+        vNormalW  = normalize(mat3(modelMatrix) * gNormal);
       }
     `
   );
@@ -245,7 +245,6 @@ material.onBeforeCompile = (shader) => {
   // ---- Fragment prelude: uniforms + varyings + helpers ----
   shader.fragmentShader =
   `
-    #define saturate(a) clamp(a,0.0,1.0)
     uniform float uTime, uSeed;
     uniform float uTexFreq, uTexWarp, uBaseNm, uAmpNm, uVibrance, uPastel;
     varying vec3 vWorldPos;
@@ -288,7 +287,7 @@ material.onBeforeCompile = (shader) => {
       {
         vec3 N = normalize(vNormalW);
         vec3 V = normalize(cameraPosition - vWorldPos);
-        float ndv = saturate(dot(N, V));
+        float ndv = clamp(dot(N, V), 0.0, 1.0);
 
         float f = stripeField(vWorldPos * 0.7 + N * 0.25, uTexFreq, uTexWarp, uTime, uSeed);
         float d_nm = uBaseNm + uAmpNm * (f - 0.5) * 2.0;
