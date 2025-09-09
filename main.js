@@ -1,15 +1,15 @@
 // Iridescent Folding Crystal — single evolving shape.
-// Load directly in a modern browser. No build tools required.
+// Loads directly in a modern browser. No build tools required.
 
-import * as THREE from 'https://unpkg.com/three@0.160.0/build/three.module.js';
-import { OrbitControls } from 'https://unpkg.com/three@0.160.0/examples/jsm/controls/OrbitControls.js?module';
-import { ConvexGeometry } from 'https://unpkg.com/three@0.160.0/examples/jsm/geometries/ConvexGeometry.js?module';
-import { EffectComposer } from 'https://unpkg.com/three@0.160.0/examples/jsm/postprocessing/EffectComposer.js?module';
-import { RenderPass } from 'https://unpkg.com/three@0.160.0/examples/jsm/postprocessing/RenderPass.js?module';
-import { UnrealBloomPass } from 'https://unpkg.com/three@0.160.0/examples/jsm/postprocessing/UnrealBloomPass.js?module';
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { ConvexGeometry } from 'three/addons/geometries/ConvexGeometry.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import GUI from 'https://cdn.jsdelivr.net/npm/lil-gui@0.19/+esm';
 
-// ---- Controls (minimal, right side) ----
+// ---------- Parameters (minimal controls on the right) ----------
 const params = {
   speed: 1.0,            // animation rate
   fold: 0.85,            // fold intensity
@@ -23,7 +23,7 @@ const params = {
   reseed: () => reseed(true), // rebuild base shape
 };
 
-// ---- Renderer / Scene / Camera ----
+// ---------- Renderer / Scene / Camera ----------
 const canvas = /** @type {HTMLCanvasElement} */ (document.getElementById('scene'));
 const renderer = new THREE.WebGLRenderer({
   canvas,
@@ -48,19 +48,19 @@ controls.enableDamping = true;
 controls.dampingFactor = 0.08;
 controls.rotateSpeed = 0.6;
 
-// ---- Postprocessing (subtle glow) ----
+// ---------- Postprocessing (subtle glow) ----------
 let composer, bloom;
 function setupComposer() {
-  const size = new THREE.Vector2();
-  renderer.getSize(size);
+  const width = Math.max(1, window.innerWidth - getPanelWidth());
+  const height = Math.max(1, window.innerHeight);
   composer = new EffectComposer(renderer);
   composer.addPass(new RenderPass(scene, camera));
-  bloom = new UnrealBloomPass(size, 0.32, 0.7, 0.0); // gentle glow
+  bloom = new UnrealBloomPass(new THREE.Vector2(width, height), 0.32, 0.7, 0.0);
   composer.addPass(bloom);
 }
 setupComposer();
 
-// ---- Utilities ----
+// ---------- Utilities ----------
 function mulberry32(a) {
   return function () {
     let t = (a += 0x6D2B79F5);
@@ -70,7 +70,7 @@ function mulberry32(a) {
   };
 }
 
-// ---- Shaders (folding + thin-film palette) ----
+// ---------- Shaders (folding + thin-film palette) ----------
 const vertexShader = /* glsl */ `
   varying vec3 vWorldPos;
   varying vec3 vNormalW;
@@ -233,7 +233,7 @@ const fragmentShader = /* glsl */ `
   }
 `;
 
-// ---- Material & Geometry ----
+// ---------- Material & Geometry ----------
 function makeMaterial(seed) {
   const uniforms = {
     uTime:        { value: 0 },
@@ -277,7 +277,7 @@ function makeConvexShard(seed, scale = 1.0) {
     pts.push(p);
   }
   let geom = new ConvexGeometry(pts);
-  geom = geom.toNonIndexed();     // flat-shaded facets
+  if (geom.index) geom = geom.toNonIndexed(); // avoid console warning
   geom.computeVertexNormals();
   geom.center();
   geom.scale(scale, scale, scale);
@@ -285,14 +285,14 @@ function makeConvexShard(seed, scale = 1.0) {
   return geom;
 }
 
-// ---- Create the shard (one evolving object) ----
+// ---------- Create the shard (one evolving object) ----------
 let seed = 0.1375;
 const material = makeMaterial(seed);
 const shard = new THREE.Mesh(makeConvexShard(seed, 1.0), material);
 shard.rotation.set(0.32, -0.18, 0.12);
 scene.add(shard);
 
-// ---- GUI (minimal) ----
+// ---------- GUI (minimal, right side) ----------
 const gui = new GUI({ title: 'Controls', width: 300 });
 gui.add(params, 'speed', 0.0, 3.0, 0.01).name('Speed');
 gui.add(params, 'fold', 0.0, 1.5, 0.01).name('Fold Intensity').onChange(syncUniforms);
@@ -328,7 +328,7 @@ function reseed(rebuildGeometry = false) {
   }
 }
 
-// ---- Resize: keep canvas out from under the panel ----
+// ---------- Resize: keep canvas out from under the panel ----------
 function getPanelWidth() {
   const el = document.querySelector('.lil-gui.root');
   return el ? Math.ceil(el.getBoundingClientRect().width) : 300;
@@ -337,8 +337,12 @@ function resizeRenderer() {
   const panelW = getPanelWidth();
   const width = Math.max(1, window.innerWidth - panelW);
   const height = Math.max(1, window.innerHeight);
-  // update both drawing buffer and CSS size
-  renderer.setSize(width, height, true);
+
+  // Match both drawing buffer and CSS size so OrbitControls pick coords correctly
+  renderer.setSize(width, height, false);
+  renderer.domElement.style.width = width + 'px';
+  renderer.domElement.style.height = height + 'px';
+
   composer.setSize(width, height);
   camera.aspect = width / height;
   camera.updateProjectionMatrix();
@@ -346,7 +350,7 @@ function resizeRenderer() {
 window.addEventListener('resize', resizeRenderer);
 resizeRenderer();
 
-// ---- Animation loop — single shape continuously evolving ----
+// ---------- Animation loop — single shape continuously evolving ----------
 const clock = new THREE.Clock();
 let time = 0;
 
