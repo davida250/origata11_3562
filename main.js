@@ -1,498 +1,216 @@
-import * as THREE from "three";
-import { OrbitControls } from "three/addons/controls/OrbitControls.js";
-import { ConvexGeometry } from "three/addons/geometries/ConvexGeometry.js";
-import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
-import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
-import { AfterimagePass } from "three/addons/postprocessing/AfterimagePass.js";
-import GUI from "lil-gui";
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
-/* -------------------------------------------------------------
-   DOM READY (prevents 'appendChild of null')
-------------------------------------------------------------- */
-await new Promise((resolve) => {
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", resolve, { once: true });
-  } else {
-    resolve();
-  }
-});
-
-/* -------------------------------------------------------------
-   HOST CONTAINER (fallback if missing)
-------------------------------------------------------------- */
-const host = (() => {
-  const el = document.getElementById("sceneHost");
-  if (el) return el;
-  const div = document.createElement("div");
-  div.id = "sceneHost";
-  div.style.position = "fixed";
-  div.style.left = "0"; div.style.top = "0"; div.style.bottom = "0"; div.style.right = "300px";
-  document.body.appendChild(div);
-  return div;
-})();
-
-/* -------------------------------------------------------------
-   RENDERER / SCENE / CAMERA / CONTROLS
-------------------------------------------------------------- */
-const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false, powerPreference: "high-performance" });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-renderer.setSize(host.clientWidth, host.clientHeight);
-renderer.setClearColor(0x000000, 1);
-renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 1.1;
-renderer.outputColorSpace = THREE.SRGBColorSpace;
-host.appendChild(renderer.domElement);
-
+// --- Scene Setup ---
 const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+camera.position.z = 3;
 
-const camera = new THREE.PerspectiveCamera(45, host.clientWidth / host.clientHeight, 0.1, 100);
-camera.position.set(2.7, 1.8, 3.6);
-camera.lookAt(0, 0, 0);
+const renderer = new THREE.WebGLRenderer({
+    canvas: document.querySelector('#webgl'),
+    antialias: true
+});
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 
+// --- Controls ---
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
-controls.minDistance = 1.2;
-controls.maxDistance = 8;
+controls.autoRotate = true;
+controls.autoRotateSpeed = 0.5;
 
-/* -------------------------------------------------------------
-   LIGHTS
-------------------------------------------------------------- */
-const hemi = new THREE.HemisphereLight(0xffffff, 0x223344, 0.4);
-scene.add(hemi);
-const dir = new THREE.DirectionalLight(0xffffff, 1.0);
-dir.position.set(3.5, 5.0, 2.0);
-scene.add(dir);
+// --- Load Texture ---
+// This texture provides the base iridescent color and linear patterns.
+const textureLoader = new THREE.TextureLoader();
+const holographicTexture = textureLoader.load(
+    'https://upload.wikimedia.org/wikipedia/commons/8/82/Holographic_texture_02.jpg',
+    (texture) => {
+        texture.wrapS = THREE.RepeatWrapping;
+        texture.wrapT = THREE.RepeatWrapping;
+    }
+);
 
-/* -------------------------------------------------------------
-   POST-PRO (Afterimage time-delay trails)
-   (EffectComposer / RenderPass / AfterimagePass) — docs/examples
-------------------------------------------------------------- */
-const composer = new EffectComposer(renderer);
-composer.addPass(new RenderPass(scene, camera));
-const afterPass = new AfterimagePass(0.80); // 'damp' uniform; lower = longer trails
-composer.addPass(afterPass);
-
-/* -------------------------------------------------------------
-   PARAMETERS + GUI
-------------------------------------------------------------- */
-const params = {
-  seed: 7,
-  faces: 26,
-
-  foldAmplitudeDeg: 38, // how far each facet hinges (degrees)
-  speed: 0.55,          // fold tempo (shader speed)
-  phaseSpread: 1.25,    // how de-synchronized faces are
-  inflate: 0.02,        // push faces out along normals to avoid z-fight
-
-  stripeDensity: 3.0,   // bands per world unit
-  stripeWarp: 1.35,     // domain warp strength
-  stripeSharp: 1.6,     // band sharpness
-
-  iridescence: 0.95,    // fresnel-based hue shift strength
-  filmNmMin: 180.0,     // thin-film thickness range (nm)
-  filmNmMax: 420.0,
-  rimPower: 2.0,        // chromatic rim power
-
-  trails: 0.82,         // AfterimagePass 'damp' (0 off .. ~0.98)
-  rotateY: 0.12,        // idle spin
-
-  regenerate: () => rebuildCrystal(),
+// --- UI Sliders ---
+const ui = {
+    speed: document.getElementById('speed'),
+    distortion: document.getElementById('distortion'),
+    fresnel: document.getElementById('fresnel'),
 };
 
-const gui = new GUI({ container: document.getElementById("gui") });
-gui.add(params, "seed", 1, 9999, 1).name("Random Seed").onChange(() => params.regenerate());
-gui.add(params, "faces", 8, 64, 1).name("Face Count").onChange(() => params.regenerate());
-gui.add(params, "foldAmplitudeDeg", 0, 80, 1).name("Amplitude (°)");
-gui.add(params, "speed", 0.05, 2.0, 0.01).name("Speed");
-gui.add(params, "phaseSpread", 0.0, 3.0, 0.01).name("Phase Spread");
-gui.add(params, "inflate", 0.0, 0.08, 0.001).name("Face Offset");
-gui.add(params, "trails", 0.0, 0.98, 0.01).name("Trails (damp)");
-gui.add(params, "stripeDensity", 0.5, 7.0, 0.05).name("Stripe Density");
-gui.add(params, "stripeWarp", 0.0, 3.0, 0.01).name("Stripe Warp");
-gui.add(params, "stripeSharp", 0.8, 3.0, 0.01).name("Stripe Sharpness");
-gui.add(params, "iridescence", 0.0, 1.5, 0.01).name("Iridescence");
-gui.add(params, "filmNmMin", 100.0, 350.0, 1).name("Film nm Min");
-gui.add(params, "filmNmMax", 250.0, 700.0, 1).name("Film nm Max");
-gui.add(params, "rimPower", 0.5, 5.0, 0.05).name("Rim Power");
-gui.add(params, "rotateY", 0.0, 0.8, 0.01).name("Idle Spin");
-gui.add(params, "regenerate").name("Regenerate");
+// --- Shaders ---
 
-/* -------------------------------------------------------------
-   UTILS
-------------------------------------------------------------- */
-function mulberry32(seed) {
-  return function () {
-    let t = (seed += 0x6d2b79f5);
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
-function pickInUnitSphere(rand) {
-  // Marsaglia method
-  let x, y, z, s;
-  do {
-    x = rand() * 2 - 1;
-    y = rand() * 2 - 1;
-    s = x * x + y * y;
-  } while (s >= 1 || s === 0);
-  const factor = Math.sqrt(1 - s);
-  z = 2 * s - 1;
-  return new THREE.Vector3(2 * x * factor, 2 * y * factor, z).normalize();
-}
+const vertexShader = `
+    uniform float uTime;
+    uniform float uSpeed;
+    uniform float uDistortion;
 
-/* -------------------------------------------------------------
-   SHADERS
-   - Vertex: per-face hinge rotation around a pivot + inflate
-   - Fragment: tri-planar stripes + thin-film (Zucconi spectral)
-------------------------------------------------------------- */
-const crystalVertex = /* glsl */ `
-precision highp float;
+    varying vec2 vUv;
+    varying vec3 vNormal;
+    varying vec3 vViewPosition;
 
-uniform float uTime;
-uniform float uSpeed;
-uniform float uAmp;        // radians
-uniform float uInflate;    // along normal
-uniform float uPhaseSpread;
+    // Simplex 3D Noise - used for organic, smooth procedural values
+    // Author: Ashima Arts
+    vec3 mod289(vec3 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
+    vec4 mod289(vec4 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
+    vec4 permute(vec4 x) { return mod289(((x*34.0)+1.0)*x); }
+    vec4 taylorInvSqrt(vec4 r) { return 1.79284291400159 - 0.85373472095314 * r; }
 
-attribute vec3 aCenter;    // per-face pivot
-attribute vec3 aAxis;      // per-face hinge axis
-attribute float aPhase;    // per-face phase seed
-attribute float aRand;     // per-face random [0,1]
-
-varying vec3 vWorldPos;
-varying vec3 vWorldNormal;
-varying vec3 vObjectPos;
-varying float vFaceRnd;
-
-// Rodrigues rotation around normalized axis
-vec3 rotateAroundAxis(vec3 p, vec3 axis, float ang){
-  float s = sin(ang), c = cos(ang);
-  return p * c + cross(axis, p) * s + axis * dot(axis, p) * (1.0 - c);
-}
-
-void main(){
-  vec3 axis = normalize(aAxis);
-  float t = uTime * uSpeed + aPhase * uPhaseSpread;
-  // pause near extremes, snap through the middle (origami-ish)
-  float w = sin(t);
-  float snap = smoothstep(0.0, 1.0, abs(w));
-  float theta = uAmp * w * (0.55 + 0.45 * snap);
-
-  // rotate vertex around its face centroid
-  vec3 local = position - aCenter;
-  local = rotateAroundAxis(local, axis, theta);
-
-  // inflate along rotated normal (approximate by rotating the attribute normal)
-  vec3 n = normal;
-  n = rotateAroundAxis(n, axis, theta);
-  local += n * uInflate * (0.5 + 0.8 * (aRand - 0.5));
-
-  vec3 newPos = aCenter + local;
-
-  vObjectPos = newPos;
-  vFaceRnd = aRand;
-
-  vec3 worldPos = (modelMatrix * vec4(newPos, 1.0)).xyz;
-  vWorldPos = worldPos;
-  vec3 worldNormal = normalize(mat3(modelMatrix) * n);
-  vWorldNormal = worldNormal;
-
-  gl_Position = projectionMatrix * viewMatrix * vec4(worldPos, 1.0);
-}
-`;
-
-const crystalFragment = /* glsl */ `
-precision highp float;
-
-uniform float uTime;
-uniform float uStripeDensity;
-uniform float uStripeWarp;
-uniform float uStripeSharp;
-uniform float uIridescence;
-uniform float uFilmNmMin;
-uniform float uFilmNmMax;
-uniform float uRimPower;
-uniform vec3  uLightDir;
-uniform vec3  uLightColor;
-uniform vec3  uAmbient;
-
-varying vec3 vWorldPos;
-varying vec3 vWorldNormal;
-varying vec3 vObjectPos;
-varying float vFaceRnd;
-
-// --- Tri-planar helpers ---
-vec3 triplanarWeights(vec3 n) {
-  n = abs(n);
-  n = max(n, 1e-5);
-  return n / (n.x + n.y + n.z);
-}
-
-// Stripe field with domain warp; returns [0,1]
-float stripes2D(vec2 uv, float density, float sharp, float time, float rot, float warp) {
-  // rotate uv
-  float s = sin(rot), c = cos(rot);
-  uv = mat2(c,-s,s,c) * uv;
-
-  // domain warp
-  if (warp > 0.0) {
-    float ww = sin(uv.x * 1.2 + uv.y * 1.7 + time*0.15);
-    uv += vec2(ww, sin(uv.x*0.7 + time*0.11)) * (warp * 0.6);
-  }
-
-  float v = sin(uv.x * density + time*0.4);
-  v = 0.5 + 0.5 * v;
-  v = pow(v, sharp); // sharpen to get crisp bands
-  return v;
-}
-
-// spectral_zucconi6: wavelength (nm) -> RGB
-// Based on Alan Zucconi's "Improving the Rainbow"
-vec3 bump3y(vec3 x, vec3 y) {
-  vec3 y2 = 1.0 - x * x;
-  y2 = max(y2 - y, 0.0);
-  return y2;
-}
-vec3 spectral_zucconi6(float w) {
-  float x = clamp((w - 400.0)/300.0, 0.0, 1.0);
-  vec3 c1 = vec3(3.54585104, 2.93225262, 2.41593945);
-  vec3 x1 = vec3(0.69549072, 0.49228336, 0.27699880);
-  vec3 y1 = vec3(0.02312639, 0.15225084, 0.52607955);
-  vec3 c2 = vec3(3.90307140, 3.21182957, 3.96587128);
-  vec3 x2 = vec3(0.97901834, 0.50353000, 0.06436224);
-  vec3 y2 = vec3(0.04555408, 0.07691347, 0.12848300);
-  return clamp(bump3y(c1 * (x - x1), y1) + bump3y(c2 * (x - x2), y2), 0.0, 1.0);
-}
-
-void main() {
-  vec3 N = normalize(vWorldNormal);
-  vec3 V = normalize(cameraPosition - vWorldPos);
-  vec3 L = normalize(uLightDir);
-
-  // Tri-planar procedural stripes in world space
-  vec3 w = triplanarWeights(N);
-  float density = uStripeDensity;
-  float sharp   = uStripeSharp;
-  float time    = uTime;
-  float warp    = uStripeWarp;
-
-  vec3 wp = vWorldPos;
-
-  float sx = stripes2D(wp.yz, density, sharp, time, 0.35, warp);
-  float sy = stripes2D(wp.xz, density, sharp, time, 1.55, warp);
-  float sz = stripes2D(wp.xy, density, sharp, time, -0.65, warp);
-  float sBlend = (sx*w.x + sy*w.y + sz*w.z) / (w.x + w.y + w.z);
-
-  // Fresnel for angle-dependent effects
-  float ndv = clamp(dot(N, V), 0.0, 1.0);
-  float fres = pow(1.0 - ndv, 2.0);
-
-  // Thin-film thickness (nm), modulated by stripes and view angle
-  float filmNm = mix(uFilmNmMin, uFilmNmMax, clamp(sBlend, 0.0, 1.0));
-  filmNm += uIridescence * (100.0 * fres); // angle dependence
-
-  vec3 filmColor = spectral_zucconi6(filmNm);
-
-  // Lighting
-  float NdotL = clamp(dot(N, L), 0.0, 1.0);
-  vec3 diffuse = filmColor * (0.35 + 0.65 * NdotL);
-
-  vec3 H = normalize(L + V);
-  float spec = pow(max(dot(N, H), 0.0), 80.0) * (0.25 + 0.75 * fres);
-  vec3 specCol = mix(vec3(1.0), filmColor, 0.6) * spec;
-
-  float rim = pow(1.0 - ndv, uRimPower);
-  vec3 rimCol = vec3(0.9, 0.4, 1.2) * rim * 0.25;
-
-  vec3 color = uAmbient * filmColor + uLightColor * diffuse + specCol + rimCol;
-  color = pow(color, vec3(0.9)); // mild artistic gamma tweak
-
-  gl_FragColor = vec4(color, 1.0);
-}
-`;
-
-/* -------------------------------------------------------------
-   CRYSTAL BUILD
-   - Random convex poly via ConvexGeometry
-   - Non-indexed geometry to allow *per-face* attributes
-------------------------------------------------------------- */
-let crystal = null;
-let crystalMat = null;
-
-function buildCrystalGeometry(seed, targetFaceCount = 24) {
-  const rand = mulberry32(seed);
-
-  // Random points on/near a sphere, jitter radius for irregular facets
-  const pts = [];
-  const OUTER = 1.0;
-  for (let i = 0; i < targetFaceCount; i++) {
-    const dir = pickInUnitSphere(rand);
-    const r = OUTER * (0.6 + 0.5 * rand()); // 0.6..1.1
-    pts.push(new THREE.Vector3().copy(dir).multiplyScalar(r));
-  }
-
-  const base = new ConvexGeometry(pts); // convex hull (docs) 
-  const geom = base.toNonIndexed();     // tri-soup for per-face attributes
-  geom.computeVertexNormals();
-
-  const pos = geom.attributes.position.array;
-  const vcount = pos.length / 3;
-  const faceCount = vcount / 3;
-
-  const centers = new Float32Array(vcount * 3);
-  const axes    = new Float32Array(vcount * 3);
-  const phases  = new Float32Array(vcount);
-  const rands   = new Float32Array(vcount);
-
-  const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3();
-  const e0 = new THREE.Vector3(), e1 = new THREE.Vector3(), norm = new THREE.Vector3();
-  const centroid = new THREE.Vector3();
-
-  for (let f = 0; f < faceCount; f++) {
-    const i0 = f * 9, i1 = i0 + 3, i2 = i0 + 6;
-
-    a.set(pos[i0], pos[i0+1], pos[i0+2]);
-    b.set(pos[i1], pos[i1+1], pos[i1+2]);
-    c.set(pos[i2], pos[i2+1], pos[i2+2]);
-
-    centroid.copy(a).add(b).add(c).multiplyScalar(1/3);
-    e0.copy(b).sub(a);
-    e1.copy(c).sub(a);
-    norm.copy(e0).cross(e1).normalize();
-
-    // Hinge axis (choose an in-plane direction, lightly randomized)
-    const pick = rand();
-    const axis = new THREE.Vector3();
-    if (pick < 0.34) axis.copy(e0).normalize();
-    else if (pick < 0.67) axis.copy(e1).normalize();
-    else axis.copy(e0).add(e1).normalize();
-
-    const phase = rand() * Math.PI * 2.0; // independent phase
-    const rnd   = rand();
-
-    for (let k = 0; k < 3; k++) {
-      const vIndex = f * 3 + k;
-
-      centers[vIndex*3+0] = centroid.x;
-      centers[vIndex*3+1] = centroid.y;
-      centers[vIndex*3+2] = centroid.z;
-
-      axes[vIndex*3+0] = axis.x;
-      axes[vIndex*3+1] = axis.y;
-      axes[vIndex*3+2] = axis.z;
-
-      phases[vIndex] = phase;
-      rands[vIndex]  = rnd;
+    float snoise(vec3 v) {
+        const vec2 C = vec2(1.0/6.0, 1.0/3.0);
+        const vec4 D = vec4(0.0, 0.5, 1.0, 2.0);
+        vec3 i  = floor(v + dot(v, C.yyy));
+        vec3 x0 = v - i + dot(i, C.xxx);
+        vec3 g = step(x0.yzx, x0.xyz);
+        vec3 l = 1.0 - g;
+        vec3 i1 = min(g.xyz, l.zxy);
+        vec3 i2 = max(g.xyz, l.zxy);
+        vec3 x1 = x0 - i1 + C.xxx;
+        vec3 x2 = x0 - i2 + C.yyy;
+        vec3 x3 = x0 - D.yyy;
+        i = mod289(i);
+        vec4 p = permute(permute(permute(
+            i.z + vec4(0.0, i1.z, i2.z, 1.0))
+            + i.y + vec4(0.0, i1.y, i2.y, 1.0))
+            + i.x + vec4(0.0, i1.x, i2.x, 1.0));
+        float n_ = 0.142857142857;
+        vec3 ns = n_ * D.wyz - D.xzx;
+        vec4 j = p - 49.0 * floor(p * ns.z * ns.z);
+        vec4 x_ = floor(j * ns.z);
+        vec4 y_ = floor(j - 7.0 * x_);
+        vec4 x = x_ * ns.x + ns.yyyy;
+        vec4 y = y_ * ns.x + ns.yyyy;
+        vec4 h = 1.0 - abs(x) - abs(y);
+        vec4 b0 = vec4(x.xy, y.xy);
+        vec4 b1 = vec4(x.zw, y.zw);
+        vec4 s0 = floor(b0)*2.0 + 1.0;
+        vec4 s1 = floor(b1)*2.0 + 1.0;
+        vec4 sh = -step(h, vec4(0.0));
+        vec4 a0 = b0.xzyw + s0.xzyw*sh.xxyy;
+        vec4 a1 = b1.xzyw + s1.xzyw*sh.zzww;
+        vec3 p0 = vec3(a0.xy,h.x);
+        vec3 p1 = vec3(a0.zw,h.y);
+        vec3 p2 = vec3(a1.xy,h.z);
+        vec3 p3 = vec3(a1.zw,h.w);
+        vec4 norm = taylorInvSqrt(vec4(dot(p0,p0), dot(p1,p1), dot(p2,p2), dot(p3,p3)));
+        p0 *= norm.x;
+        p1 *= norm.y;
+        p2 *= norm.z;
+        p3 *= norm.w;
+        vec4 m = max(0.6 - vec4(dot(x0,x0), dot(x1,x1), dot(x2,x2), dot(x3,x3)), 0.0);
+        m = m * m;
+        return 42.0 * dot(m*m, vec4(dot(p0,x0), dot(p1,x1), dot(p2,x2), dot(p3,x3)));
     }
-  }
 
-  geom.setAttribute("aCenter", new THREE.BufferAttribute(centers, 3));
-  geom.setAttribute("aAxis",   new THREE.BufferAttribute(axes, 3));
-  geom.setAttribute("aPhase",  new THREE.BufferAttribute(phases, 1));
-  geom.setAttribute("aRand",   new THREE.BufferAttribute(rands, 1));
+    void main() {
+        vUv = uv;
+        vNormal = normal;
+        
+        // --- Vertex Displacement ---
+        // This is the core logic for the folding effect.
+        // We use two layers of noise ("octaves") for more complex folding.
+        // The first layer creates the large, slow folds.
+        float noiseTime = uTime * uSpeed;
+        float largeFolds = snoise(position * 0.5 + noiseTime);
+        
+        // The second layer adds smaller, faster details on top.
+        float smallFolds = snoise(position * 2.5 + noiseTime * 1.5);
 
-  // Normalize scale
-  geom.computeBoundingSphere();
-  const s = 1.2 / (geom.boundingSphere?.radius || 1.0);
-  geom.scale(s, s, s);
+        // Combine the noise and apply it along the vertex normal to push/pull the vertex.
+        float displacement = (largeFolds * 0.7 + smallFolds * 0.3) * uDistortion;
+        vec3 newPosition = position + normal * displacement;
 
-  return geom;
-}
+        vec4 modelViewPosition = modelViewMatrix * vec4(newPosition, 1.0);
+        vViewPosition = -modelViewPosition.xyz;
+        gl_Position = projectionMatrix * modelViewPosition;
+    }
+`;
 
-function buildCrystalMaterial() {
-  const uniforms = {
-    uTime:          { value: 0 },
-    uSpeed:         { value: params.speed },
-    uAmp:           { value: THREE.MathUtils.degToRad(params.foldAmplitudeDeg) },
-    uInflate:       { value: params.inflate },
-    uPhaseSpread:   { value: params.phaseSpread },
+const fragmentShader = `
+    uniform sampler2D uTexture;
+    uniform float uFresnelPower;
 
-    uStripeDensity: { value: params.stripeDensity },
-    uStripeWarp:    { value: params.stripeWarp },
-    uStripeSharp:   { value: params.stripeSharp },
+    varying vec2 vUv;
+    varying vec3 vNormal;
+    varying vec3 vViewPosition;
 
-    uIridescence:   { value: params.iridescence },
-    uFilmNmMin:     { value: params.filmNmMin },
-    uFilmNmMax:     { value: params.filmNmMax },
-    uRimPower:      { value: params.rimPower },
+    void main() {
+        // --- Base Color from Texture ---
+        // We tile the texture (vUv * 2.0) to make the pattern finer.
+        vec4 textureColor = texture2D(uTexture, vUv * 2.0);
+        
+        // --- Fresnel Effect for iridescent highlights ---
+        // This calculates how much a surface is facing the camera.
+        // Edges will have a higher fresnel value, creating a rim-light effect.
+        vec3 viewDirection = normalize(vViewPosition);
+        float fresnel = 1.0 - dot(normalize(vNormal), viewDirection);
+        fresnel = pow(fresnel, uFresnelPower); // Power controls the sharpness of the glow
 
-    uLightDir:      { value: new THREE.Vector3(0.6, 1.0, 0.25).normalize() },
-    uLightColor:    { value: new THREE.Color(1.0, 0.95, 1.0) },
-    uAmbient:       { value: new THREE.Color(0.04, 0.06, 0.08) },
-  };
+        // --- Final Color ---
+        // We add the bright fresnel highlight to the texture color.
+        vec3 finalColor = textureColor.rgb + fresnel;
 
-  const mat = new THREE.ShaderMaterial({
-    vertexShader: crystalVertex,
-    fragmentShader: crystalFragment,
-    uniforms,
-    transparent: false,
-    side: THREE.DoubleSide, // show backfaces when folding
-    dithering: true
-  });
+        gl_FragColor = vec4(finalColor, 1.0);
+    }
+`;
 
-  return mat;
-}
 
-function rebuildCrystal() {
-  if (crystal) {
-    scene.remove(crystal);
-    crystal.geometry.dispose();
-    crystal.material.dispose();
-  }
-  const geom = buildCrystalGeometry(params.seed, params.faces);
-  crystalMat = buildCrystalMaterial();
-  crystal = new THREE.Mesh(geom, crystalMat);
-  scene.add(crystal);
-}
-rebuildCrystal();
+// --- Geometry and Material ---
+// An Icosahedron gives us a complex starting shape.
+// Higher detail (the second parameter, 15) gives a smoother deformation.
+const geometry = new THREE.IcosahedronGeometry(1.2, 15);
+const material = new THREE.ShaderMaterial({
+    vertexShader,
+    fragmentShader,
+    uniforms: {
+        uTime: { value: 0 },
+        uSpeed: { value: parseFloat(ui.speed.value) },
+        uDistortion: { value: parseFloat(ui.distortion.value) },
+        uFresnelPower: { value: parseFloat(ui.fresnel.value) },
+        uTexture: { value: holographicTexture }
+    },
+});
 
-/* -------------------------------------------------------------
-   RESIZE
-------------------------------------------------------------- */
-function resize() {
-  const w = host.clientWidth;
-  const h = host.clientHeight;
-  renderer.setSize(w, h);
-  composer.setSize(w, h);
-  camera.aspect = w / h;
-  camera.updateProjectionMatrix();
-}
-const ro = new ResizeObserver(resize);
-ro.observe(host);
+const mesh = new THREE.Mesh(geometry, material);
+scene.add(mesh);
 
-/* -------------------------------------------------------------
-   ANIMATION LOOP
-------------------------------------------------------------- */
+// --- UI Listeners ---
+ui.speed.addEventListener('input', (event) => {
+    material.uniforms.uSpeed.value = parseFloat(event.target.value);
+});
+
+ui.distortion.addEventListener('input', (event) => {
+    material.uniforms.uDistortion.value = parseFloat(event.target.value);
+});
+
+ui.fresnel.addEventListener('input', (event) => {
+    material.uniforms.uFresnelPower.value = parseFloat(event.target.value);
+});
+
+// --- Handle Window Resize ---
+window.addEventListener('resize', () => {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+});
+
+// --- Animation Loop ---
 const clock = new THREE.Clock();
+
 function animate() {
-  const dt = clock.getDelta();
-  const t = clock.elapsedTime;
+    const elapsedTime = clock.getElapsedTime();
 
-  if (crystalMat) {
-    const u = crystalMat.uniforms;
-    u.uTime.value = t;
-    u.uSpeed.value = params.speed;
-    u.uAmp.value = THREE.MathUtils.degToRad(params.foldAmplitudeDeg);
-    u.uInflate.value = params.inflate;
-    u.uPhaseSpread.value = params.phaseSpread;
+    // Update shader time uniform for animation
+    material.uniforms.uTime.value = elapsedTime;
 
-    u.uStripeDensity.value = params.stripeDensity;
-    u.uStripeWarp.value = params.stripeWarp;
-    u.uStripeSharp.value = params.stripeSharp;
+    // Update orbit controls
+    controls.update();
 
-    u.uIridescence.value = params.iridescence;
-    u.uFilmNmMin.value = params.filmNmMin;
-    u.uFilmNmMax.value = params.filmNmMax;
-    u.uRimPower.value = params.rimPower;
-  }
+    // Render the scene
+    renderer.render(scene, camera);
 
-  afterPass.uniforms["damp"].value = params.trails; // AfterimagePass control (examples)
-
-  if (crystal) crystal.rotation.y += params.rotateY * dt;
-
-  controls.update();
-  composer.render();
-  requestAnimationFrame(animate);
+    // Call animate again on the next frame
+    requestAnimationFrame(animate);
 }
+
 animate();
