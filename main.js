@@ -1,11 +1,10 @@
 // Iridescent folding crystal — continuous folds (no separation),
 // vibrant thin‑film stripes + real reflections/refraction (MeshPhysicalMaterial).
-// Open index.html in a modern browser.
 
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { ConvexGeometry } from 'three/addons/geometries/ConvexGeometry.js';
-import { BufferGeometryUtils } from 'three/addons/utils/BufferGeometryUtils.js';
+import { mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js'; // <-- correct import
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import GUI from 'https://cdn.jsdelivr.net/npm/lil-gui@0.19/+esm';
 
@@ -76,9 +75,8 @@ function mulberry32(a) {
 }
 
 /* ===== Geometry: convex "crystal" with shared vertices =====
-   - ConvexGeometry is non-indexed; we merge vertices to index it.
-   - We bake a continuous smooth normal attribute `aSmooth` for displacement.
-   ======================================================================= */
+   - ConvexGeometry starts non-indexed; we merge vertices to index it.
+   - We bake a continuous smooth normal attribute `aSmooth` for displacement. */
 function makeConvexShard(seed, scale = 1.0) {
   const rng = mulberry32(Math.floor(seed * 1e6));
   const pts = [];
@@ -95,8 +93,8 @@ function makeConvexShard(seed, scale = 1.0) {
 
   // Start as non-indexed convex, then merge to create shared vertices.
   let geom = new ConvexGeometry(pts);
-  geom = BufferGeometryUtils.mergeVertices(geom, 1e-4); // <- indexed (no separation)
-  geom.computeVertexNormals(); // smooth normals for continuous displacement
+  geom = mergeVertices(geom, 1e-4); // <-- continuous hull (no separation)
+  geom.computeVertexNormals();       // smooth normals for continuous displacement
   geom.center();
   geom.scale(scale, scale, scale);
   geom.computeBoundingSphere();
@@ -110,7 +108,7 @@ function makeConvexShard(seed, scale = 1.0) {
 /* ===== Material: MeshPhysical + shader patch (safe) =====
    - Displacement happens along `aSmooth` (continuous).
    - Emissive adds thin-film stripes (view dependent).
-   - Keep Three's PBR stack for reflections/refraction/iridescence.        */
+   - We keep Three's PBR stack for reflections/refraction/iridescence. */
 let seed = 0.1375;
 
 const material = new THREE.MeshPhysicalMaterial({
@@ -127,11 +125,12 @@ const material = new THREE.MeshPhysicalMaterial({
   iridescenceThicknessRange: [P.iriMinNm, P.iriMaxNm],
   envMapIntensity: P.envIntensity,
   side: THREE.DoubleSide,
-  flatShading: true // keeps the faceted look while geometry remains continuous
+  flatShading: true // faceted look while geometry remains continuous
 });
 
+// Inject folding + thin‑film in a robust way
 material.onBeforeCompile = (shader) => {
-  // --- Uniforms (GPU)
+  // GPU uniforms
   Object.assign(shader.uniforms, {
     uTime:       { value: 0.0 },
     uSeed:       { value: seed },
@@ -148,7 +147,7 @@ material.onBeforeCompile = (shader) => {
     uPastel:     { value: P.pastel },
   });
 
-  // --- Varyings + attribute + uniforms (VERTEX)
+  // Varyings/attributes/uniforms in vertex
   shader.vertexShader =
   `
     attribute vec3 aSmooth;
@@ -164,7 +163,7 @@ material.onBeforeCompile = (shader) => {
     uniform vec3  uFoldN2;
   ` + shader.vertexShader;
 
-  // --- Helpers + main() hook
+  // Helpers + main() hook
   shader.vertexShader = shader.vertexShader.replace(
     'void main() {',
     `
@@ -228,7 +227,7 @@ material.onBeforeCompile = (shader) => {
     `
   );
 
-  // --- Apply folding & continuous displacement; write varyings
+  // Apply folding & continuous displacement; write varyings
   shader.vertexShader = shader.vertexShader.replace(
     '#include <begin_vertex>',
     `
@@ -237,7 +236,7 @@ material.onBeforeCompile = (shader) => {
         vec3 p = transformed;
         float t = uTime * 0.5 + uSeed * 17.0;
 
-        // Animated fold axes (keep simple; avoid driver overload issues)
+        // Animated fold axes
         vec3 dyn1 = normalize(vec3(sin(t*0.7), cos(t*0.9), sin(t*0.5)));
         vec3 dyn2 = normalize(vec3(cos(t*0.6), sin(t*0.8), cos(t*0.4)));
         vec3 n1 = normalize(uFoldN1 * 0.65 + dyn1 * 0.35);
@@ -261,7 +260,7 @@ material.onBeforeCompile = (shader) => {
     `
   );
 
-  // --- Fragment prelude: uniforms + varyings + helpers (no macro defines)
+  // Fragment prelude: uniforms + varyings + helpers (no macro defines)
   shader.fragmentShader =
   `
     uniform float uTime, uSeed;
@@ -298,7 +297,7 @@ material.onBeforeCompile = (shader) => {
     }
   ` + shader.fragmentShader;
 
-  // --- Add emissive contribution (vibrant stripes)
+  // Add emissive contribution (vibrant stripes)
   shader.fragmentShader = shader.fragmentShader.replace(
     '#include <emissivemap_fragment>',
     `
