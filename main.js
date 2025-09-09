@@ -1,6 +1,5 @@
-// Iridescent folding crystal — one continuous shape with folding motion,
-// vibrant thin-film stripes, reflections, and refraction.
-// Open index.html in a modern browser.
+// Iridescent folding crystal — continuous folding, vibrant thin‑film stripes,
+// with reflections & refraction via MeshPhysicalMaterial.
 
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
@@ -8,71 +7,63 @@ import { ConvexGeometry } from 'three/addons/geometries/ConvexGeometry.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import GUI from 'https://cdn.jsdelivr.net/npm/lil-gui@0.19/+esm';
 
-/* =======================
-   Minimal user parameters
-   ======================= */
+/* ========== Minimal controls ========== */
 const P = {
-  // Motion / folding
+  // Motion / fold
   speed: 1.0,
-  fold: 0.95,
-  noiseAmp: 0.28,
-  noiseScale: 1.7,
+  fold: 1.05,
+  noiseAmp: 0.30,
+  noiseScale: 1.8,
   autoRotate: true,
 
-  // Thin-film stripe field (drives vibrant texture)
-  texFreq: 12.0,
+  // Vibrant thin‑film texture
+  texFreq: 13.5,
   texWarp: 0.55,
-  baseNm: 420.0, // base film thickness in nm
-  ampNm: 340.0,  // variation of thickness (nm)
-  vibrance: 1.2, // emissive boost of film
-  pastel: 0.18,  // lift toward white (0..1)
+  baseNm: 420.0,
+  ampNm: 360.0,
+  vibrance: 1.35,
+  pastel: 0.15,
 
-  // Physical material knobs (reflections/refraction/iridescence)
-  envIntensity: 1.4,
-  transmission: 0.75,
-  thickness: 0.65,
+  // Physical material (reflections/refraction)
+  envIntensity: 1.6,
+  transmission: 0.78,
+  thickness: 0.75,
   ior: 1.36,
-  roughness: 0.08,
+  roughness: 0.06,
   clearcoat: 1.0,
   clearcoatRoughness: 0.12,
-  iridescence: 1.0,       // PBR iridescence (in addition to our film overlay)
-  iriMinNm: 250.0,        // built-in iridescence thickness range
-  iriMaxNm: 800.0,
+  iridescence: 1.0,
+  iriMinNm: 250.0,
+  iriMaxNm: 900.0,
 
   reseed: () => reseed(true),
 };
 
-/* ===============
-   Renderer setup
-   =============== */
+/* ========== Renderer / Scene ========== */
 const canvas = /** @type {HTMLCanvasElement} */ (document.getElementById('scene'));
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false, powerPreference: 'high-performance' });
 renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
 renderer.setClearColor(0x000000, 1);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 1.1;
+renderer.toneMappingExposure = 1.15;
 renderer.physicallyCorrectLights = true;
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x000000);
 
-// Environment for realistic reflections/refraction (analytic, no external HDR)
+// Clean, neutral environment for reflections/refraction
 const pmrem = new THREE.PMREMGenerator(renderer);
 const envRT = pmrem.fromScene(new RoomEnvironment(renderer), 0.04);
 scene.environment = envRT.texture;
 
-/* ================
-   Camera & orbit
-   ================ */
+/* ========== Camera / Controls ========== */
 const camera = new THREE.PerspectiveCamera(32, 1, 0.1, 100);
 camera.position.set(0, 0, 4.8);
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true; controls.dampingFactor = 0.08; controls.rotateSpeed = 0.6;
 
-/* =================
-   Utility: RNG
-   ================= */
+/* ========== Utilities ========== */
 function mulberry32(a) {
   return function () {
     let t = (a += 0x6D2B79F5);
@@ -82,29 +73,21 @@ function mulberry32(a) {
   };
 }
 
-/* =========================
-   Geometry: convex "crystal"
-   ========================= */
+/* ========== Geometry (convex crystal) ========== */
 function makeConvexShard(seed, scale = 1.0) {
   const rng = mulberry32(Math.floor(seed * 1e6));
   const pts = [];
-  const NUM = 14 + Math.floor(rng() * 8); // 14..21 points
+  const NUM = 14 + Math.floor(rng() * 8); // 14..21
   for (let i = 0; i < NUM; i++) {
     const r = 0.8 + rng() * 0.65;
-    const p = new THREE.Vector3(
-      (rng() * 2 - 1) * r,
-      (rng() * 2 - 1) * r,
-      (rng() * 2 - 1) * r
-    );
-    // Snap some axes to create crystalline planar faces
+    const p = new THREE.Vector3((rng()*2-1)*r, (rng()*2-1)*r, (rng()*2-1)*r);
     if (rng() < 0.32) p.x = Math.round(p.x * 2.0) * 0.42;
     if (rng() < 0.32) p.y = Math.round(p.y * 2.0) * 0.42;
     if (rng() < 0.32) p.z = Math.round(p.z * 2.0) * 0.42;
     pts.push(p);
   }
   let geom = new ConvexGeometry(pts);
-  // Keep faces continuous, but flat-shaded look
-  if (geom.index) geom = geom.toNonIndexed();
+  if (geom.index) geom = geom.toNonIndexed(); // flat-shaded facets, continuous surface
   geom.computeVertexNormals();
   geom.center();
   geom.scale(scale, scale, scale);
@@ -112,9 +95,7 @@ function makeConvexShard(seed, scale = 1.0) {
   return geom;
 }
 
-/* =========================================
-   Material: MeshPhysical + shader injection
-   ========================================= */
+/* ========== Material: Physical + safe shader patch ========== */
 let seed = 0.1375;
 
 const material = new THREE.MeshPhysicalMaterial({
@@ -126,41 +107,43 @@ const material = new THREE.MeshPhysicalMaterial({
   transmission: P.transmission,
   thickness: P.thickness,
   ior: P.ior,
-  iridescence: P.iridescence,           // built-in PBR iridescence
+  iridescence: P.iridescence,
   iridescenceIOR: 1.30,
   iridescenceThicknessRange: [P.iriMinNm, P.iriMaxNm],
   envMapIntensity: P.envIntensity,
   side: THREE.DoubleSide
 });
 
-// We patch the vertex & fragment shaders of MeshPhysicalMaterial (no separate ShaderMaterial).
 material.onBeforeCompile = (shader) => {
-  // uniforms for animation / folding / stripes
-  shader.uniforms.uTime       = { value: 0 };
-  shader.uniforms.uSeed       = { value: seed };
-  shader.uniforms.uFold       = { value: P.fold };
-  shader.uniforms.uNoiseAmp   = { value: P.noiseAmp };
-  shader.uniforms.uNoiseScale = { value: P.noiseScale };
-  shader.uniforms.uFoldN1     = { value: new THREE.Vector3(1, 0, 0) };
-  shader.uniforms.uFoldN2     = { value: new THREE.Vector3(0, 1, 0) };
+  // --- custom uniforms
+  Object.assign(shader.uniforms, {
+    uTime:       { value: 0.0 },
+    uSeed:       { value: seed },
+    uFold:       { value: P.fold },
+    uNoiseAmp:   { value: P.noiseAmp },
+    uNoiseScale: { value: P.noiseScale },
+    uFoldN1:     { value: new THREE.Vector3(1,0,0) },
+    uFoldN2:     { value: new THREE.Vector3(0,1,0) },
+    uTexFreq:    { value: P.texFreq },
+    uTexWarp:    { value: P.texWarp },
+    uBaseNm:     { value: P.baseNm },
+    uAmpNm:      { value: P.ampNm },
+    uVibrance:   { value: P.vibrance },
+    uPastel:     { value: P.pastel },
+  });
 
-  shader.uniforms.uTexFreq    = { value: P.texFreq };
-  shader.uniforms.uTexWarp    = { value: P.texWarp };
-  shader.uniforms.uBaseNm     = { value: P.baseNm };
-  shader.uniforms.uAmpNm      = { value: P.ampNm };
-  shader.uniforms.uVibrance   = { value: P.vibrance };
-  shader.uniforms.uPastel     = { value: P.pastel };
-
-  // Expose world position to fragment for our stripe field
-  shader.vertexShader = `
+  // --- varyings (world pos & world normal)
+  shader.vertexShader =
+    `
     varying vec3 vWorldPos;
-  ` + shader.vertexShader;
+    varying vec3 vNormalW;
+    ` + shader.vertexShader;
 
-  // Insert noise + folding helpers (vertex)
+  // --- helpers + main hook (vertex)
   shader.vertexShader = shader.vertexShader.replace(
     'void main() {',
     `
-    // --- Custom helpers (vertex) ---
+    // Simplex noise (iq)
     vec3 mod289(vec3 x){ return x - floor(x * (1.0/289.0)) * 289.0; }
     vec4 mod289(vec4 x){ return x - floor(x * (1.0/289.0)) * 289.0; }
     vec4 permute(vec4 x){ return mod289(((x*34.0)+1.0)*x); }
@@ -208,7 +191,7 @@ material.onBeforeCompile = (shader) => {
       return 42.0 * dot(m*m, vec4(dot(p0,x0), dot(p1,x1), dot(p2,x2), dot(p3,x3)));
     }
 
-    // Continuous folding along plane normal n (triangular wave mapping)
+    // Triangular-wave folding along plane normal n
     vec3 foldSpace(vec3 p, vec3 n, float period, float intensity) {
       float d = dot(p, n);
       float tri = abs(mod(d + period, 2.0*period) - period) - 0.5*period;
@@ -220,16 +203,7 @@ material.onBeforeCompile = (shader) => {
     `
   );
 
-  // Push world position to varying
-  shader.vertexShader = shader.vertexShader.replace(
-    '#include <worldpos_vertex>',
-    `
-      #include <worldpos_vertex>
-      vWorldPos = worldPosition.xyz;
-    `
-  );
-
-  // Apply folding + noise on positions; keep surface continuous
+  // --- apply folding & displacement; compute varyings safely here
   shader.vertexShader = shader.vertexShader.replace(
     '#include <begin_vertex>',
     `
@@ -242,19 +216,27 @@ material.onBeforeCompile = (shader) => {
         float foldI = uFold * (0.7 + 0.3 * sin(uTime*0.6 + uSeed));
         p = foldSpace(p, n1, 1.35, foldI);
         p = foldSpace(p, n2, 1.05, foldI * 0.66);
+
         float ns = snoise(p * uNoiseScale + vec3(0.0, t*0.6, t*0.3) + uSeed);
         p += normalize(objectNormal) * (uNoiseAmp * ns);
+
         transformed = p;
+
+        // World-space varyings (don’t rely on internal chunks)
+        vWorldPos = (modelMatrix * vec4(transformed, 1.0)).xyz;
+        vNormalW  = normalize(mat3(modelMatrix) * normalize(objectNormal));
       }
     `
   );
 
-  // Fragment: add thin-film stripe color to emissive for vibrancy
-  shader.fragmentShader = `
+  // --- fragment prelude (uniforms + varyings + helpers)
+  shader.fragmentShader =
+    `
     #define saturate(a) clamp(a,0.0,1.0)
     uniform float uTime, uSeed;
     uniform float uTexFreq, uTexWarp, uBaseNm, uAmpNm, uVibrance, uPastel;
     varying vec3 vWorldPos;
+    varying vec3 vNormalW;
 
     vec2 rot2(vec2 p, float a){ float c=cos(a), s=sin(a); return mat2(c,-s,s,c)*p; }
 
@@ -266,7 +248,6 @@ material.onBeforeCompile = (shader) => {
       return 0.5 + 0.5 * mix(s, w, clamp(warp, 0.0, 1.0));
     }
 
-    // Simplified unpolarized thin-film reflectance for three wavelengths
     vec3 thinFilm(float ndv, float d_nm, float n2) {
       float n1 = 1.0, n3 = 1.50;
       float sin2 = max(0.0, 1.0 - ndv*ndv);
@@ -274,7 +255,7 @@ material.onBeforeCompile = (shader) => {
       float R12 = pow((n1 - n2)/(n1 + n2), 2.0);
       float R23 = pow((n2 - n3)/(n2 + n3), 2.0);
       float A = 2.0 * sqrt(R12 * R23);
-      float PI4 = 12.5663706144;
+      float PI4 = 12.56637061435917295385;
       float lR = 650.0, lG = 510.0, lB = 440.0;
       float phiR = PI4*n2*d_nm*cos2 / lR;
       float phiG = PI4*n2*d_nm*cos2 / lG;
@@ -284,20 +265,20 @@ material.onBeforeCompile = (shader) => {
       float rB = clamp(R12 + R23 + A * cos(phiB), 0.0, 1.0);
       return vec3(rR, rG, rB);
     }
-  ` + shader.fragmentShader;
+    ` + shader.fragmentShader;
 
+  // --- add emissive contribution using our film
   shader.fragmentShader = shader.fragmentShader.replace(
     '#include <emissivemap_fragment>',
     `
       #include <emissivemap_fragment>
       {
-        // View-dependent, domain-warped thin-film stripes
-        float f = stripeField(vWorldPos * 0.7 + normal * 0.25, uTexFreq, uTexWarp, uTime, uSeed);
-        float d_nm = uBaseNm + uAmpNm * (f - 0.5) * 2.0;
-
-        vec3 N = normalize(normal);
-        vec3 V = normalize(-vViewPosition);
+        vec3 N = normalize(vNormalW);
+        vec3 V = normalize(cameraPosition - vWorldPos);
         float ndv = saturate(dot(N, V));
+
+        float f = stripeField(vWorldPos * 0.7 + N * 0.25, uTexFreq, uTexWarp, uTime, uSeed);
+        float d_nm = uBaseNm + uAmpNm * (f - 0.5) * 2.0;
 
         vec3 filmRGB = thinFilm(ndv, d_nm, 1.35);
         filmRGB = mix(filmRGB, vec3(1.0), clamp(uPastel, 0.0, 1.0));
@@ -307,48 +288,43 @@ material.onBeforeCompile = (shader) => {
     `
   );
 
-  material.userData.shader = shader; // keep a handle for updates
+  material.userData.shader = shader;
 };
 
-// force initial compile so onBeforeCompile runs and uniforms exist
 material.needsUpdate = true;
 
-/* ================
-   Mesh and scene
-   ================ */
+/* ========== Mesh ========== */
 const shard = new THREE.Mesh(makeConvexShard(seed, 1.0), material);
 shard.rotation.set(0.32, -0.18, 0.12);
 scene.add(shard);
 
-/* =========
-   GUI
-   ========= */
+/* ========== GUI (right side, minimal) ========== */
 const gui = new GUI({ title: 'Controls', width: 300 });
 
 const fTex = gui.addFolder('Texture');
 fTex.add(P, 'texFreq', 3.0, 28.0, 0.1).name('Frequency').onChange(syncUniforms);
 fTex.add(P, 'texWarp', 0.0, 1.0, 0.01).name('Warp').onChange(syncUniforms);
 fTex.add(P, 'baseNm', 250.0, 600.0, 1.0).name('Base (nm)').onChange(syncUniforms);
-fTex.add(P, 'ampNm', 0.0, 400.0, 1.0).name('Variation (nm)').onChange(syncUniforms);
-fTex.add(P, 'vibrance', 0.0, 2.5, 0.01).name('Vibrance').onChange(syncUniforms);
+fTex.add(P, 'ampNm', 0.0, 450.0, 1.0).name('Variation (nm)').onChange(syncUniforms);
+fTex.add(P, 'vibrance', 0.0, 3.0, 0.01).name('Vibrance').onChange(syncUniforms);
 fTex.add(P, 'pastel', 0.0, 1.0, 0.01).name('Pastel').onChange(syncUniforms);
 
 const fShape = gui.addFolder('Shape');
-fShape.add(P, 'fold', 0.0, 1.6, 0.01).name('Fold').onChange(syncUniforms);
+fShape.add(P, 'fold', 0.0, 1.8, 0.01).name('Fold').onChange(syncUniforms);
 fShape.add(P, 'noiseAmp', 0.0, 1.2, 0.01).name('Noise Amp').onChange(syncUniforms);
 fShape.add(P, 'noiseScale', 0.2, 4.0, 0.01).name('Noise Scale').onChange(syncUniforms);
 
 const fMat = gui.addFolder('Material');
-fMat.add(P, 'envIntensity', 0.0, 3.0, 0.01).name('Env Intensity').onChange(()=>{ material.envMapIntensity = P.envIntensity; });
-fMat.add(P, 'transmission', 0.0, 1.0, 0.01).name('Transmission').onChange(()=>{ material.transmission = P.transmission; });
-fMat.add(P, 'thickness', 0.0, 2.0, 0.01).name('Thickness').onChange(()=>{ material.thickness = P.thickness; });
-fMat.add(P, 'ior', 1.0, 2.0, 0.001).name('IOR').onChange(()=>{ material.ior = P.ior; });
-fMat.add(P, 'roughness', 0.0, 1.0, 0.001).name('Roughness').onChange(()=>{ material.roughness = P.roughness; });
-fMat.add(P, 'clearcoat', 0.0, 1.0, 0.001).name('Clearcoat').onChange(()=>{ material.clearcoat = P.clearcoat; });
-fMat.add(P, 'clearcoatRoughness', 0.0, 1.0, 0.001).name('Clearcoat Rough.').onChange(()=>{ material.clearcoatRoughness = P.clearcoatRoughness; });
-fMat.add(P, 'iridescence', 0.0, 1.0, 0.001).name('PBR Iridescence').onChange(()=>{ material.iridescence = P.iridescence; });
-fMat.add(P, 'iriMinNm', 0.0, 1000.0, 1.0).name('Iri Min (nm)').onChange(()=>{ material.iridescenceThicknessRange = [P.iriMinNm, P.iriMaxNm]; });
-fMat.add(P, 'iriMaxNm', 0.0, 2000.0, 1.0).name('Iri Max (nm)').onChange(()=>{ material.iridescenceThicknessRange = [P.iriMinNm, P.iriMaxNm]; });
+fMat.add(P, 'envIntensity', 0.0, 3.0, 0.01).name('Env Intensity').onChange(()=> material.envMapIntensity = P.envIntensity);
+fMat.add(P, 'transmission', 0.0, 1.0, 0.01).name('Transmission').onChange(()=> material.transmission = P.transmission);
+fMat.add(P, 'thickness', 0.0, 2.0, 0.01).name('Thickness').onChange(()=> material.thickness = P.thickness);
+fMat.add(P, 'ior', 1.0, 2.0, 0.001).name('IOR').onChange(()=> material.ior = P.ior);
+fMat.add(P, 'roughness', 0.0, 1.0, 0.001).name('Roughness').onChange(()=> material.roughness = P.roughness);
+fMat.add(P, 'clearcoat', 0.0, 1.0, 0.001).name('Clearcoat').onChange(()=> material.clearcoat = P.clearcoat);
+fMat.add(P, 'clearcoatRoughness', 0.0, 1.0, 0.001).name('Clearcoat Rough.').onChange(()=> material.clearcoatRoughness = P.clearcoatRoughness);
+fMat.add(P, 'iridescence', 0.0, 1.0, 0.001).name('PBR Iridescence').onChange(()=> material.iridescence = P.iridescence);
+fMat.add(P, 'iriMinNm', 0.0, 1000.0, 1.0).name('Iri Min (nm)').onChange(()=> material.iridescenceThicknessRange = [P.iriMinNm, P.iriMaxNm]);
+fMat.add(P, 'iriMaxNm', 0.0, 2000.0, 1.0).name('Iri Max (nm)').onChange(()=> material.iridescenceThicknessRange = [P.iriMinNm, P.iriMaxNm]);
 
 const fMotion = gui.addFolder('Motion');
 fMotion.add(P, 'speed', 0.0, 3.0, 0.01).name('Speed');
@@ -357,8 +333,7 @@ fMotion.add(P, 'autoRotate').name('Auto Rotate');
 gui.add(P, 'reseed').name('Reseed Shape');
 
 function syncUniforms() {
-  const sh = material.userData.shader;
-  if (!sh) return;
+  const sh = material.userData.shader; if (!sh) return;
   sh.uniforms.uFold.value       = P.fold;
   sh.uniforms.uNoiseAmp.value   = P.noiseAmp;
   sh.uniforms.uNoiseScale.value = P.noiseScale;
@@ -387,9 +362,7 @@ function reseed(rebuildGeometry = false) {
 }
 syncUniforms();
 
-/* ==================
-   Resize management
-   ================== */
+/* ========== Resize ========== */
 function panelWidth() {
   const el = document.querySelector('.lil-gui.root');
   return el ? Math.ceil(el.getBoundingClientRect().width) : 300;
@@ -406,9 +379,7 @@ function onResize() {
 window.addEventListener('resize', onResize);
 onResize();
 
-/* ==============
-   Render loop
-   ============== */
+/* ========== Animate ========== */
 const clock = new THREE.Clock();
 let time = 0;
 
@@ -416,11 +387,9 @@ function animate() {
   const dt = clock.getDelta();
   time += dt * (0.6 + P.speed * 1.4);
 
-  // update uniforms
   const sh = material.userData.shader;
   if (sh) sh.uniforms.uTime.value = time;
 
-  // gentle autorotation (the fold keeps morphing regardless)
   if (P.autoRotate) {
     shard.rotation.y += dt * 0.25;
     shard.rotation.x += dt * 0.07;
