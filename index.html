@@ -1,37 +1,63 @@
 <!doctype html>
 <html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <title>Folding Iridescent Shape — Three.js (SDF Ray March)</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1" />
-  <style>
-    html, body {
-      margin: 0; height: 100%; overflow: hidden; background: #000;
-      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
-    }
-    #app { position: fixed; inset: 0; }
-    /* Put the GUI on the right */
-    .lil-gui.root {
-      position: fixed !important;
-      right: 12px; top: 12px;
-      max-height: calc(100% - 24px);
-      overflow: auto;
-      border-radius: 8px;
-      backdrop-filter: blur(6px);
-    }
-    .credits {
-      position: fixed; left: 12px; bottom: 10px; color: #a0a0a0; font-size: 12px;
-      mix-blend-mode: lighten; user-select: none; pointer-events: none;
-    }
-  </style>
-</head>
-<body>
-  <div id="app"></div>
-  <div class="credits">
-    SDF folding + thin-film shader. Drag to orbit. Scroll to zoom.
-  </div>
+  <head>
+    <meta charset="utf-8" />
+    <title>Folding Iridescent Crystal — three.js</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <style>
+      html, body {
+        margin: 0; height: 100%; overflow: hidden; background: #000;
+        color: #e6e6e6; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+      }
+      .layout {
+        position: fixed; inset: 0; display: grid;
+        grid-template-columns: 1fr 300px; /* right-side controls */
+      }
+      #sceneHost { position: relative; background: #000; }
+      #ui {
+        border-left: 1px solid #222; background: #0b0b0b;
+        padding: 10px 8px 16px 8px; overflow: auto;
+      }
+      .hint {
+        font-size: 12px; line-height: 1.35; color: #aaa; margin-top: 8px;
+      }
+      .brand { font-size: 12px; color: #7a7a7a; margin: 10px 0 0 2px; }
+      canvas { display: block; }
+      /* lil-gui override for dark panel that blends in */
+      .lil-gui { --background-color: #0f0f10; --text-color:#e6e6e6; --title-background-color:#121215; --widget-color:#1b1b1d; --hover-color:#242428; --focus-color:#2c2c31; --number-color:#fff; }
+    </style>
 
-  <!-- Three.js & dependencies -->
-  <script type="module" src="main.js"></script>
-</body>
+    <!-- Import maps for bare-module imports in main.js -->
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://unpkg.com/three@0.165.0/build/three.module.js",
+          "three/addons/": "https://unpkg.com/three@0.165.0/examples/jsm/",
+          "lil-gui": "https://unpkg.com/lil-gui@0.19/dist/lil-gui.esm.min.js"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div class="layout">
+      <div id="sceneHost"></div>
+      <aside id="ui">
+        <h3 style="margin:8px 8px 6px 8px; font-weight:600;">Folding Crystal</h3>
+        <div id="gui"></div>
+        <div class="hint">
+          <p><strong>Tips</strong></p>
+          <ul style="padding-left:18px; margin:6px 0;">
+            <li><em>Speed</em> controls fold tempo; <em>Amplitude</em> how far facets hinge.</li>
+            <li><em>Trails</em> adds a time‑delay afterimage (0 = off, 0.9 = long trails).</li>
+            <li><em>Stripe Density</em>/<em>Warp</em> sculpt the interference‑like bands.</li>
+            <li><em>Iridescence</em>/<em>Film nm</em> tune thin‑film color shift.</li>
+          </ul>
+        </div>
+        <div class="brand">three.js + custom GLSL · ACES tone mapping</div>
+      </aside>
+    </div>
+
+    <!-- Main module -->
+    <script type="module" src="./main.js"></script>
+  </body>
 </html>
