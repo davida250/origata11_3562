@@ -1,494 +1,351 @@
-import * as THREE from "three";
-import { OrbitControls } from "three/addons/controls/OrbitControls.js";
-import { ConvexGeometry } from "three/addons/geometries/ConvexGeometry.js";
-import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
-import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
-import { AfterimagePass } from "three/addons/postprocessing/AfterimagePass.js";
-import GUI from "lil-gui";
+// ----------------------------------------------
+// Folding Iridescent Shape (SDF ray-march) in Three.js
+// ----------------------------------------------
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import GUI from 'https://unpkg.com/lil-gui@0.19/dist/lil-gui.esm.min.js';
 
-/* =========================================================================================
-   Folding Iridescent Crystal
-   -----------------------------------------------------------------------------------------
-   Core ideas:
-   - Generate a random convex polyhedron (ConvexGeometry).
-   - Convert to NON-indexed geometry to get per-face control, then attach attributes:
-       aCenter (pivot), aAxis (hinge axis), aPhase/random (phase offset).
-     Ref: non-indexed & per-face normals/attributes.  (three.js forum/answers)
-   - Vertex shader rotates each face around its axis with time-based phase & amplitude.
-   - Fragment shader uses TRI-PLANAR procedural stripes + thin-film spectral coloring.
-     Ref: tri-planar mapping (Patricio Gonzalez Vivo), spectral_zucconi6 (Alan Zucconi).
-   - AfterimagePass provides "time-delay" trails.
-   ======================================================================================= */
-
-// -------------------------------------------------------------------------------------------------
-// Scene / Renderer
-// -------------------------------------------------------------------------------------------------
-const host = document.getElementById("sceneHost");
-const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false, powerPreference: "high-performance" });
-renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
-renderer.setSize(host.clientWidth, host.clientHeight);
+// Scene setup
+const app = document.getElementById("app");
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
-renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 1.1;
-renderer.setClearColor(0x000000, 1);
-host.appendChild(renderer.domElement);
+app.appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
-scene.fog = null; // black
-
-const camera = new THREE.PerspectiveCamera(45, host.clientWidth / host.clientHeight, 0.1, 100);
-camera.position.set(2.7, 1.8, 3.6);
+const camera = new THREE.PerspectiveCamera(40, window.innerWidth / window.innerHeight, 0.01, 100);
+camera.position.set(0.0, 0.0, 3.5);
 camera.lookAt(0, 0, 0);
 
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
-controls.minDistance = 1.2;
-controls.maxDistance = 8;
-controls.autoRotate = false;
+controls.dampingFactor = 0.06;
+controls.enablePan = false;
 
-// Lights: subtle + rim
-const hemi = new THREE.HemisphereLight(0xffffff, 0x223344, 0.4);
-scene.add(hemi);
-const dir = new THREE.DirectionalLight(0xffffff, 1.0);
-dir.position.set(3.5, 5.0, 2.0);
-scene.add(dir);
+// Fullscreen plane to run the shader on
+const quadGeo = new THREE.PlaneGeometry(2, 2);
+const uniforms = {
+  uTime: { value: 0 },
+  uSpeed: { value: 0.9 },
+  uRotSpeed: { value: 0.35 },
+  uFoldAmp: { value: 0.85 },
+  uEdgeSoften: { value: 0.0025 },
+  uStripeFreq: { value: 8.0 },
+  uStripeWarp: { value: 0.7 },
+  uIriStrength: { value: 1.0 },
+  uFilmThickness: { value: 420.0 }, // in nm
+  uColorDelay: { value: 0.35 },
+  uExposure: { value: 1.15 },
 
-// -------------------------------------------------------------------------------------------------
-// Post-processing (Afterimage trails)
-// -------------------------------------------------------------------------------------------------
-const composer = new EffectComposer(renderer);
-composer.addPass(new RenderPass(scene, camera));
-const afterPass = new AfterimagePass(0.80); // damp; overridden by GUI
-composer.addPass(afterPass);
+  uResolution: { value: new THREE.Vector2(renderer.domElement.width, renderer.domElement.height) },
+  uCamPos: { value: new THREE.Vector3() },
+  uCamRight: { value: new THREE.Vector3() },
+  uCamUp: { value: new THREE.Vector3() },
+  uCamForward: { value: new THREE.Vector3() },
+  uFovY: { value: THREE.MathUtils.degToRad(camera.fov) },
 
-// -------------------------------------------------------------------------------------------------
-// Parameters & GUI
-// -------------------------------------------------------------------------------------------------
-const params = {
-  seed: 7,
-  faces: 26,
-  foldAmplitudeDeg: 38, // degrees, peak hinge angle
-  speed: 0.55,          // Hz-like factor (radians/sec in shader)
-  phaseSpread: 1.25,    // how desynchronized faces are (multiplies random phase)
-  inflate: 0.02,        // push faces along normal while folding (prevents z-fight)
-  stripeDensity: 3.0,   // bands per unit
-  stripeWarp: 1.35,     // domain warp strength
-  stripeSharp: 1.6,     // band sharpness
-  iridescence: 0.95,    // fresnel hue strength
-  filmNmMin: 180.0,     // thin film thickness range in nanometers
-  filmNmMax: 420.0,
-  rimPower: 2.0,        // chromatic rim power
-  trails: 0.82,         // AfterimagePass damp (0..0.99) lower=longer trails; 0 disables pass in code below
-  rotateY: 0.12,        // idle spin
-  regenerate: () => rebuildCrystal(),
+  uTintA: { value: new THREE.Color(0.85, 1.05, 1.20) },
+  uTintB: { value: new THREE.Color(1.12, 0.9, 1.2) },
 };
 
-const gui = new GUI({ container: document.getElementById("gui") });
-gui.add(params, "seed", 1, 9999, 1).name("Random Seed").onChange(() => params.regenerate());
-gui.add(params, "faces", 8, 64, 1).name("Face Count").onChange(() => params.regenerate());
-gui.add(params, "foldAmplitudeDeg", 0, 80, 1).name("Amplitude (°)");
-gui.add(params, "speed", 0.05, 2.0, 0.01).name("Speed");
-gui.add(params, "phaseSpread", 0.0, 3.0, 0.01).name("Phase Spread");
-gui.add(params, "inflate", 0.0, 0.08, 0.001).name("Face Offset");
-gui.add(params, "trails", 0.0, 0.98, 0.01).name("Trails (damp)");
-gui.add(params, "stripeDensity", 0.5, 7.0, 0.05).name("Stripe Density");
-gui.add(params, "stripeWarp", 0.0, 3.0, 0.01).name("Stripe Warp");
-gui.add(params, "stripeSharp", 0.8, 3.0, 0.01).name("Stripe Sharpness");
-gui.add(params, "iridescence", 0.0, 1.5, 0.01).name("Iridescence");
-gui.add(params, "filmNmMin", 100.0, 350.0, 1).name("Film nm Min");
-gui.add(params, "filmNmMax", 250.0, 700.0, 1).name("Film nm Max");
-gui.add(params, "rimPower", 0.5, 5.0, 0.05).name("Rim Power");
-gui.add(params, "rotateY", 0.0, 0.8, 0.01).name("Idle Spin");
-gui.add(params, "regenerate").name("Regenerate");
-
-// -------------------------------------------------------------------------------------------------
-// Utilities
-// -------------------------------------------------------------------------------------------------
-function mulberry32(seed) {
-  return function () {
-    let t = (seed += 0x6d2b79f5);
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
-function pickInUnitSphere(rand) {
-  // Marsaglia method
-  let x, y, z, s;
-  do {
-    x = rand() * 2 - 1;
-    y = rand() * 2 - 1;
-    s = x * x + y * y;
-  } while (s >= 1 || s === 0);
-  const factor = Math.sqrt(1 - s);
-  z = 2 * s - 1;
-  return new THREE.Vector3(2 * x * factor, 2 * y * factor, z).normalize();
-}
-
-// -------------------------------------------------------------------------------------------------
-// Shader (GLSL): folding vertex + tri-planar thin-film fragment
-// -------------------------------------------------------------------------------------------------
-const crystalVertex = /* glsl */ `
-  precision highp float;
-  uniform float uTime;
-  uniform float uSpeed;
-  uniform float uAmp;        // radians
-  uniform float uInflate;    // along normal
-  uniform float uPhaseSpread;
-  attribute vec3 aCenter;    // per-face pivot
-  attribute vec3 aAxis;      // per-face hinge axis (object space)
-  attribute float aPhase;    // per-face phase seed
-  attribute float aRand;     // per-face random [0,1]
-  varying vec3 vWorldPos;
-  varying vec3 vWorldNormal;
-  varying vec3 vObjectPos;
-  varying float vFaceRnd;
-
-  // Rodrigues rotation around normalized axis
-  vec3 rotateAroundAxis(vec3 p, vec3 axis, float ang){
-    float s = sin(ang), c = cos(ang);
-    return p * c + cross(axis, p) * s + axis * dot(axis, p) * (1.0 - c);
-  }
-
-  void main(){
-    vec3 axis = normalize(aAxis);
-    float t = uTime * uSpeed + aPhase * uPhaseSpread;
-    // “Origami-like” easing: hold near extremes, snap through mid
-    float wave = sin(t);
-    float snap = smoothstep(0.0, 1.0, abs(wave));
-    float theta = uAmp * wave * (0.55 + 0.45 * snap);
-
-    // pivot & rotate face-local position
-    vec3 local = position - aCenter;
-    local = rotateAroundAxis(local, axis, theta);
-
-    // inflate along *rotated* normal (approx: rotate attribute normal too)
-    vec3 n = normal;
-    n = rotateAroundAxis(n, axis, theta);
-    local += n * uInflate * (0.5 + 0.8 * (aRand - 0.5));
-
-    vec3 newPos = aCenter + local;
-
-    // Outputs
-    vObjectPos = newPos;
-    vFaceRnd = aRand;
-    vec3 worldPos = (modelMatrix * vec4(newPos, 1.0)).xyz;
-    vWorldPos = worldPos;
-    vec3 worldNormal = normalize(mat3(modelMatrix) * n);
-    vWorldNormal = worldNormal;
-
-    gl_Position = projectionMatrix * viewMatrix * vec4(worldPos, 1.0);
-  }
-`;
-
-const crystalFragment = /* glsl */ `
-  precision highp float;
-  uniform float uTime;
-  uniform float uStripeDensity;
-  uniform float uStripeWarp;
-  uniform float uStripeSharp;
-  uniform float uIridescence;
-  uniform float uFilmNmMin;
-  uniform float uFilmNmMax;
-  uniform float uRimPower;
-  uniform vec3  uLightDir;   // world dir light (normalized)
-  uniform vec3  uLightColor;
-  uniform vec3  uAmbient;
-  varying vec3 vWorldPos;
-  varying vec3 vWorldNormal;
-  varying vec3 vObjectPos;
-  varying float vFaceRnd;
-
-  // --- Tri-planar helpers (adapted from Patricio Gonzalez Vivo gist) ---
-  vec3 triplanarWeights(vec3 n) {
-    n = abs(n);
-    n = max(n, 1e-5);
-    return n / (n.x + n.y + n.z);
-  }
-
-  // Stripe field with domain warp; returns [0,1]
-  float stripes2D(vec2 uv, float density, float sharp, float time, float rot) {
-    // rotate uv
-    float s = sin(rot), c = cos(rot);
-    uv = mat2(c,-s,s,c) * uv;
-
-    // domain warp
-    float w = sin(uv.x * 1.2 + uv.y * 1.7 + time*0.15);
-    uv += vec2(w, sin(uv.x*0.7 + time*0.11)) * ${/* warp control via uniform */""} 0.5;
-
-    float v = sin(uv.x * density + time*0.4);
-    // sharpen stripes (from sine to crisp banding)
-    v = 0.5 + 0.5 * v;
-    v = pow(v, sharp);
-    return v;
-  }
-
-  // spectral_zucconi6: maps wavelength (nm) to RGB (approx), based on Alan Zucconi
-  // Source: "Improving the Rainbow – Part 2" (2017)
-  vec3 bump3y(vec3 x, vec3 y) {
-    vec3 y2 = 1.0 - x * x;
-    y2 = max(y2 - y, 0.0);
-    return y2;
-  }
-  vec3 spectral_zucconi6(float w) {
-    // w in [400, 700]
-    float x = clamp((w - 400.0)/300.0, 0.0, 1.0);
-    vec3 c1 = vec3(3.54585104, 2.93225262, 2.41593945);
-    vec3 x1 = vec3(0.69549072, 0.49228336, 0.27699880);
-    vec3 y1 = vec3(0.02312639, 0.15225084, 0.52607955);
-    vec3 c2 = vec3(3.90307140, 3.21182957, 3.96587128);
-    vec3 x2 = vec3(0.97901834, 0.50353000, 0.06436224);
-    vec3 y2 = vec3(0.04555408, 0.07691347, 0.12848300);
-    return clamp(bump3y(c1 * (x - x1), y1) + bump3y(c2 * (x - x2), y2), 0.0, 1.0);
-  }
-
-  void main() {
-    vec3 N = normalize(vWorldNormal);
-    vec3 V = normalize(cameraPosition - vWorldPos);
-    vec3 L = normalize(uLightDir);
-
-    // Tri-planar procedural stripes in world space
-    vec3 w = triplanarWeights(N);
-    float density = uStripeDensity;
-    float sharp = uStripeSharp;
-    float time = uTime;
-
-    vec3 wp = vWorldPos; // world-space position
-
-    float sx = stripes2D(wp.yz, density, sharp, time, 0.35);
-    float sy = stripes2D(wp.xz, density, sharp, time, 1.55);
-    float sz = stripes2D(wp.xy, density, sharp, time, -0.65);
-    float sBlend = (sx*w.x + sy*w.y + sz*w.z) / (w.x + w.y + w.z);
-
-    // Extra domain warp modulated by uniform (user control)
-    float warp = uStripeWarp;
-    if (warp > 0.0) {
-      float wNoise = sin(dot(wp, vec3(0.91, 1.12, -0.73)) * 1.5 + time*0.45);
-      sBlend = mix(sBlend, 0.5 + 0.5*sin((wp.x+wp.y*1.2+wp.z*1.7)*density*0.6 + time*0.4), warp*0.6);
-      sBlend = mix(sBlend, sBlend* (0.75 + 0.25*wNoise), warp*0.4);
+const material = new THREE.ShaderMaterial({
+  uniforms,
+  vertexShader: /* glsl */`
+    varying vec2 vUv;
+    void main() {
+      vUv = uv;
+      gl_Position = vec4(position.xy, 0.0, 1.0);
     }
+  `,
+  fragmentShader: /* glsl */`#ifdef GL_ES
+precision highp float;
+#endif
 
-    // Thin-film: choose wavelength from film thickness range modulated by stripes + Fresnel
-    float ndotv = clamp(dot(N, V), 0.0, 1.0);
-    float fres = pow(1.0 - ndotv, 2.0);  // simple Fresnel term
-    float filmNm = mix(uFilmNmMin, uFilmNmMax, clamp(sBlend, 0.0, 1.0));
-    // Angle dependence: make thickness effectively vary with view angle for iridescence
-    filmNm += uIridescence * (100.0 * fres);
+uniform float uTime;
+uniform float uSpeed;
+uniform float uRotSpeed;
+uniform float uFoldAmp;
+uniform float uEdgeSoften;
+uniform float uStripeFreq;
+uniform float uStripeWarp;
+uniform float uIriStrength;
+uniform float uFilmThickness; // nm
+uniform float uColorDelay;
+uniform float uExposure;
 
-    vec3 filmColor = spectral_zucconi6(filmNm); // 0..1
+uniform vec2  uResolution;
+uniform vec3  uCamPos;
+uniform vec3  uCamRight;
+uniform vec3  uCamUp;
+uniform vec3  uCamForward;
+uniform float uFovY;
 
-    // Simple physically-inspired shading
-    float NdotL = clamp(dot(N, L), 0.0, 1.0);
-    vec3 diffuse = filmColor * (0.35 + 0.65 * NdotL);
+uniform vec3 uTintA;
+uniform vec3 uTintB;
 
-    // Specular (cheap Phong-ish)
-    vec3 H = normalize(L + V);
-    float spec = pow(max(dot(N, H), 0.0), 80.0) * (0.25 + 0.75 * fres);
-    vec3 specCol = mix(vec3(1.0), filmColor, 0.6) * spec;
+varying vec2 vUv;
 
-    // Chromatic rim (edges in the contact sheet glow with slight RGB separation)
-    float rim = pow(1.0 - ndotv, uRimPower);
-    vec3 rimCol = vec3(0.9, 0.4, 1.2) * rim * 0.25;
+const float PI = 3.141592653589793;
+const int   MAX_STEPS = 160;
+const float MAX_DIST = 20.0;
+const float SURF_EPS = 0.0007;
 
-    vec3 color = uAmbient * filmColor + uLightColor * diffuse + specCol + rimCol;
+float hash1(float n){ return fract(sin(n)*43758.5453123); }
+vec3  hash3(float n){ return fract(sin(vec3(n, n+1.0, n+2.0))*vec3(43758.5453, 22578.1459, 19642.3490)); }
 
-    // Artistic push towards pastel/soap-bubble palette
-    color = pow(color, vec3(0.9)); // mild gamma tweak
-    gl_FragColor = vec4(color, 1.0);
-  }
-`;
+vec3 rotateAxisAngle(vec3 v, vec3 axis, float angle){
+  float c = cos(angle), s = sin(angle);
+  return v*c + cross(axis, v)*s + axis*dot(axis, v)*(1.0-c);
+}
 
-// -------------------------------------------------------------------------------------------------
-// Mesh creation
-// -------------------------------------------------------------------------------------------------
-let crystal = null;
-let crystalMat = null;
+float sdPlane(vec3 p, vec4 pl){ return dot(p, pl.xyz) - pl.w; }
 
-function buildCrystalGeometry(seed, targetFaceCount = 24) {
-  const rand = mulberry32(seed);
+const int NUM_PLANES = 12;
 
-  // Generate random points on / near a sphere, then jitter radii to avoid perfect symmetry.
-  const pts = [];
-  const OUTER = 1.0;
-  for (let i = 0; i < targetFaceCount; i++) {
-    const d = pickInUnitSphere(rand);
-    const r = OUTER * (0.6 + 0.5 * rand()); // 0.6..1.1
-    pts.push(new THREE.Vector3().copy(d).multiplyScalar(r));
-  }
+vec3 baseN(int i){
+  if(i==0) return normalize(vec3( 1.0,  0.25,  0.10));
+  if(i==1) return normalize(vec3(-1.0,  0.30,  0.15));
+  if(i==2) return normalize(vec3( 0.20,  1.0,   0.35));
+  if(i==3) return normalize(vec3( 0.20, -1.0,   0.05));
+  if(i==4) return normalize(vec3( 0.05,  0.25,  1.0));
+  if(i==5) return normalize(vec3( 0.25,  0.10, -1.0));
+  if(i==6) return normalize(vec3(-0.6,  -0.1,   0.8));
+  if(i==7) return normalize(vec3( 0.7,  -0.2,  -0.6));
+  if(i==8) return normalize(vec3( 0.5,   0.7,  -0.15));
+  if(i==9) return normalize(vec3(-0.25,  0.75,  0.35));
+  if(i==10) return normalize(vec3( 0.15, -0.65,  0.7));
+  return               normalize(vec3(-0.7, -0.6, -0.2));
+}
 
-  // Convex hull (random crystal-like poly)
-  const base = new ConvexGeometry(pts);
+vec3 planeAxis(int i){
+  vec3 h = hash3(float(i)*17.123+9.73)*2.0 - 1.0;
+  return normalize(mix(h, vec3(0.0, 1.0, 0.0), 0.25));
+}
 
-  // Non-indexed so each triangle has unique vertices -> per-face attributes possible
-  const geom = base.toNonIndexed();
-  geom.computeVertexNormals(); // flat lighting preserved by per-face attributes
+float baseH(int i){
+  float b = 0.85 + 0.25 * float(i%3==0 ? 1 : 0);
+  if(i==0 || i==2) b += 0.10;
+  return b;
+}
 
-  const pos = geom.attributes.position.array;
-  const vcount = pos.length / 3;
-  const faceCount = vcount / 3;
+vec4 getPlane(int i, float t){
+  vec3 n  = baseN(i);
+  vec3 ax = planeAxis(i);
+  float phase = float(i)*1.618;
+  float ang   = uFoldAmp * 0.9 * sin(t*uRotSpeed*(0.7+0.1*float(i%5)) + phase);
+  n = rotateAxisAngle(n, ax, ang);
 
-  const centers = new Float32Array(vcount * 3);
-  const axes    = new Float32Array(vcount * 3);
-  const phases  = new Float32Array(vcount);
-  const rands   = new Float32Array(vcount);
+  float h = baseH(i) + 0.12 * sin(t * (0.5 + 0.17*float(i%4)) + phase*1.37);
+  return vec4(n, h);
+}
 
-  const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3();
-  const e0 = new THREE.Vector3(), e1 = new THREE.Vector3(), norm = new THREE.Vector3();
-  const centroid = new THREE.Vector3();
-
-  for (let f = 0; f < faceCount; f++) {
-    const i0 = f * 9;
-    const i1 = i0 + 3;
-    const i2 = i0 + 6;
-
-    a.set(pos[i0+0], pos[i0+1], pos[i0+2]);
-    b.set(pos[i1+0], pos[i1+1], pos[i1+2]);
-    c.set(pos[i2+0], pos[i2+1], pos[i2+2]);
-
-    centroid.copy(a).add(b).add(c).multiplyScalar(1/3);
-    e0.copy(b).sub(a);
-    e1.copy(c).sub(a);
-    norm.copy(e0).cross(e1).normalize();
-
-    // Pick a hinge axis inside the face plane (use one of its edges, slightly randomized)
-    const pick = rand();
-    let axis = new THREE.Vector3();
-    if (pick < 0.34) axis.copy(e0).normalize();
-    else if (pick < 0.67) axis.copy(e1).normalize();
-    else axis.copy(e0).add(e1).normalize();
-    // Jitter axis within plane
-    axis.normalize();
-
-    // Phase & randoms for desync + subtle offsets
-    const phase = rand() * Math.PI * 2.0;
-    const rnd   = rand();
-
-    for (let k = 0; k < 3; k++) {
-      const vIndex = f * 3 + k;
-
-      centers[vIndex*3+0] = centroid.x;
-      centers[vIndex*3+1] = centroid.y;
-      centers[vIndex*3+2] = centroid.z;
-
-      axes[vIndex*3+0] = axis.x;
-      axes[vIndex*3+1] = axis.y;
-      axes[vIndex*3+2] = axis.z;
-
-      phases[vIndex] = phase;
-      rands[vIndex]  = rnd;
+float sdConvexPoly(vec3 p, float t){
+  float d = -1e6;
+  float k = uEdgeSoften;
+  for(int i=0;i<NUM_PLANES;i++){
+    vec4 pl = getPlane(i, t);
+    float di = sdPlane(p, pl);
+    if(k>0.0){
+      float h = clamp(0.5 + 0.5*(di - d)/k, 0.0, 1.0);
+      d = mix(di, d, h) + k*h*(1.0-h);
+    } else {
+      d = max(d, di);
     }
   }
-
-  geom.setAttribute("aCenter", new THREE.BufferAttribute(centers, 3));
-  geom.setAttribute("aAxis",   new THREE.BufferAttribute(axes, 3));
-  geom.setAttribute("aPhase",  new THREE.BufferAttribute(phases, 1));
-  geom.setAttribute("aRand",   new THREE.BufferAttribute(rands, 1));
-
-  // A modest scale normalization
-  geom.computeBoundingSphere();
-  const s = 1.2 / (geom.boundingSphere?.radius || 1.0);
-  geom.scale(s, s, s);
-
-  return geom;
+  return d;
 }
 
-function buildCrystalMaterial() {
-  const uniforms = {
-    uTime:          { value: 0 },
-    uSpeed:         { value: params.speed },
-    uAmp:           { value: THREE.MathUtils.degToRad(params.foldAmplitudeDeg) },
-    uInflate:       { value: params.inflate },
-    uPhaseSpread:   { value: params.phaseSpread },
-
-    uStripeDensity: { value: params.stripeDensity },
-    uStripeWarp:    { value: params.stripeWarp },
-    uStripeSharp:   { value: params.stripeSharp },
-
-    uIridescence:   { value: params.iridescence },
-    uFilmNmMin:     { value: params.filmNmMin },
-    uFilmNmMax:     { value: params.filmNmMax },
-    uRimPower:      { value: params.rimPower },
-
-    uLightDir:      { value: new THREE.Vector3(0.6, 1.0, 0.25).normalize() },
-    uLightColor:    { value: new THREE.Color(1.0, 0.95, 1.0) },
-    uAmbient:       { value: new THREE.Color(0.04, 0.06, 0.08) },
-  };
-
-  const mat = new THREE.ShaderMaterial({
-    vertexShader: crystalVertex,
-    fragmentShader: crystalFragment,
-    uniforms,
-    transparent: false,
-    side: THREE.DoubleSide, // some folds expose backfaces; keep them visible
-    dithering: true
-  });
-
-  return mat;
+mat3 rotY(float a){
+  float c=cos(a), s=sin(a);
+  return mat3(c,0.,-s,  0.,1.,0.,  s,0.,c);
+}
+mat3 rotX(float a){
+  float c=cos(a), s=sin(a);
+  return mat3(1.,0.,0.,  0.,c,-s,  0.,s,c);
 }
 
-function rebuildCrystal() {
-  if (crystal) {
-    scene.remove(crystal);
-    crystal.geometry.dispose();
-    crystal.material.dispose();
+float map(vec3 p, float t){
+  p *= rotY(t*0.1);
+  p *= rotX(t*0.07);
+  return sdConvexPoly(p, t);
+}
+
+vec3 calcNormal(vec3 p, float t){
+  const vec2 e = vec2(1.0, -1.0)*0.0015;
+  return normalize(e.xyy*map(p+e.xyy,t) + e.yyx*map(p+e.yyx,t) + e.yxy*map(p+e.yxy,t) + e.xxx*map(p+e.xxx,t));
+}
+
+float fresnelSchlick(float cosTheta, float F0){
+  return F0 + (1.0 - F0) * pow(1.0 - cosTheta, 5.0);
+}
+
+vec3 thinFilmRGB(float cosThetaV, float thickness_nm, float n1, float n2, float n3){
+  float sinThetaV = sqrt(max(0.0, 1.0 - cosThetaV*cosThetaV));
+  float sinThetaT = clamp(n1/n2 * sinThetaV, 0.0, 0.9999);
+  float cosThetaT = sqrt(max(0.0, 1.0 - sinThetaT*sinThetaT));
+
+  float Rs12 = pow((n1*cosThetaV - n2*cosThetaT) / (n1*cosThetaV + n2*cosThetaT), 2.0);
+  float Rp12 = pow((n1*cosThetaT - n2*cosThetaV) / (n1*cosThetaT + n2*cosThetaV), 2.0);
+  float R12 = 0.5*(Rs12 + Rp12);
+
+  float Rs23 = pow((n2*cosThetaT - n3*cosThetaT) / (n2*cosThetaT + n3*cosThetaT), 2.0);
+  float Rp23 = pow((n2*cosThetaT - n3*cosThetaT) / (n2*cosThetaT + n3*cosThetaT), 2.0);
+  float R23 = 0.5*(Rs23 + Rp23);
+
+  float opd = 2.0 * n2 * (thickness_nm * 1e-9) * cosThetaT;
+
+  float phaseShift = 0.0;
+  if ((n1 < n2) != (n2 < n3)) phaseShift = 0.5;
+
+  vec3 lambda = vec3(680.0e-9, 540.0e-9, 450.0e-9);
+  vec3 phase = 2.0*3.141592653589793 * (opd / lambda + phaseShift);
+  vec3 cosTerm = 0.5 + 0.5*cos(phase);
+  vec3 airy = (R12 + R23 + 2.0*sqrt(R12*R23)*cos(phase));
+  airy = clamp(airy, 0.0, 1.0);
+  vec3 rgb = mix(cosTerm, airy, 0.65);
+  rgb = pow(clamp(rgb, 0.0, 1.0), vec3(0.9));
+  return rgb;
+}
+
+float filmThicknessField(vec3 wp, float tColor, float base_nm){
+  vec3 axis = normalize(vec3(0.85, 0.05, 0.52));
+  float s   = dot(wp, axis);
+  float f   = uStripeFreq;
+  float warp = uStripeWarp;
+
+  float bands = sin(s*f + 0.7*sin(s*(f*0.23) + tColor*0.7) + warp*0.9*sin(s*1.7 - tColor*0.6));
+  bands = 0.5 + 0.5*bands;
+  bands = smoothstep(0.15, 0.85, bands);
+
+  return base_nm * (0.75 + 0.5*bands);
+}
+
+vec3 shade(vec3 p, vec3 n, vec3 rd, float tGeo, float tCol){
+  vec3 L1 = normalize(vec3( 0.7,  0.6,  0.4));
+  vec3 L2 = normalize(vec3(-0.4, -0.2, -0.8));
+  vec3 cL1 = vec3(0.85, 1.10, 1.00);
+  vec3 cL2 = vec3(1.10, 0.86, 1.15);
+
+  float ndl1 = max(dot(n, L1), 0.0);
+  float ndl2 = max(dot(n, L2), 0.0);
+  float ndv  = max(dot(n, -rd), 0.0);
+
+  float thickness = filmThicknessField(p, tCol, uFilmThickness);
+  vec3 film = thinFilmRGB(ndv, thickness, 1.0, 1.52, 1.0);
+
+  float F = fresnelSchlick(1.0 - ndv, 0.04);
+  vec3 spec = (cL1*ndl1 + cL2*ndl2) * (film * (0.35 + 0.65*F));
+
+  vec3 base = mix(uTintA, uTintB, 0.5 + 0.5*sin(0.7*p.x + 1.3*p.z));
+  base *= 0.18 + 0.82*pow(ndl1+ndl2, 0.8);
+
+  vec3 col = base + spec * uIriStrength;
+
+  vec3 ambTop = vec3(0.02, 0.02, 0.03);
+  vec3 ambBot = vec3(0.00, 0.00, 0.00);
+  float h = clamp(p.y*0.25 + 0.5, 0.0, 1.0);
+  col += mix(ambBot, ambTop, h);
+
+  return col;
+}
+
+vec3 rayDirection(vec2 uv){
+  float vy = tan(0.5 * uFovY);
+  float vx = vy * (uResolution.x / uResolution.y);
+  vec3 dir = normalize(uv.x * vx * uCamRight + uv.y * vy * uCamUp + 1.0 * uCamForward);
+  return dir;
+}
+
+void main(){
+  vec2 p = (vUv*2.0 - 1.0);
+  p.x *= uResolution.x / uResolution.y;
+
+  float t = uTime * uSpeed;
+  float tCol = t - uColorDelay;
+
+  vec3 ro = uCamPos;
+  vec3 rd = rayDirection(p);
+
+  float tMarch = 0.0;
+  bool hit = false;
+  for(int i=0;i<MAX_STEPS;i++){
+    vec3 pos = ro + rd*tMarch;
+    float d = map(pos, t);
+    if(d < SURF_EPS){ hit = true; break; }
+    tMarch += d;
+    if(tMarch > MAX_DIST) break;
   }
-  const geom = buildCrystalGeometry(params.seed, params.faces);
-  crystalMat = buildCrystalMaterial();
-  crystal = new THREE.Mesh(geom, crystalMat);
-  scene.add(crystal);
-}
-rebuildCrystal();
 
-// -------------------------------------------------------------------------------------------------
-// Resize handling
-// -------------------------------------------------------------------------------------------------
-function resize() {
-  const w = host.clientWidth;
-  const h = host.clientHeight;
+  vec3 color;
+  if(hit){
+    vec3 pos = ro + rd*tMarch;
+    vec3 nor = calcNormal(pos, t);
+    color = shade(pos, nor, rd, t, tCol);
+    float rim = pow(1.0 - max(dot(nor, -rd), 0.0), 3.0);
+    color += rim * 0.12 * vec3(1.2, 1.0, 1.35);
+  } else {
+    float v = pow(1.0 - clamp(length(p), 0.0, 1.0), 3.0);
+    color = mix(vec3(0.0), vec3(0.01, 0.008, 0.012), v);
+  }
+
+  color = 1.0 - exp(-color * uExposure);
+  color = pow(color, vec3(1.0/2.2));
+  gl_FragColor = vec4(color, 1.0);
+}
+  `,
+  depthWrite: false,
+  depthTest: false,
+  transparent: false,
+});
+
+const quad = new THREE.Mesh(quadGeo, material);
+scene.add(quad);
+
+// GUI
+const gui = new GUI({ title: "Controls" });
+gui.add(uniforms.uSpeed, "value", 0.0, 3.0, 0.01).name("Speed");
+gui.add(uniforms.uRotSpeed, "value", 0.0, 2.0, 0.01).name("Rotation");
+gui.add(uniforms.uFoldAmp, "value", 0.0, 1.5, 0.001).name("Fold Intensity");
+gui.add(uniforms.uEdgeSoften, "value", 0.0, 0.01, 0.0001).name("Edge Soften");
+gui.add(uniforms.uStripeFreq, "value", 1.0, 20.0, 0.1).name("Stripe Freq");
+gui.add(uniforms.uStripeWarp, "value", 0.0, 2.5, 0.01).name("Stripe Warp");
+gui.add(uniforms.uIriStrength, "value", 0.0, 2.0, 0.01).name("Iridescence");
+gui.add(uniforms.uFilmThickness, "value", 200.0, 800.0, 1).name("Film Thickness (nm)");
+gui.add(uniforms.uColorDelay, "value", 0.0, 1.2, 0.01).name("Color Delay");
+gui.add(uniforms.uExposure, "value", 0.5, 2.0, 0.01).name("Exposure");
+
+// Resize
+function onResize(){
+  const w = window.innerWidth, h = window.innerHeight;
   renderer.setSize(w, h);
-  composer.setSize(w, h);
   camera.aspect = w / h;
   camera.updateProjectionMatrix();
+  uniforms.uResolution.value.set(renderer.domElement.width, renderer.domElement.height);
+  uniforms.uFovY.value = THREE.MathUtils.degToRad(camera.fov);
 }
-const ro = new ResizeObserver(resize);
-ro.observe(host);
+window.addEventListener("resize", onResize);
 
-// -------------------------------------------------------------------------------------------------
-// Animation
-// -------------------------------------------------------------------------------------------------
+// Per-frame camera basis -> shader
+function updateCameraBasis(){
+  const m = camera.matrixWorld;
+  const right = new THREE.Vector3();
+  const up    = new THREE.Vector3();
+  const fwd   = new THREE.Vector3();
+  m.extractBasis(right, up, fwd);
+  uniforms.uCamRight.value.copy(right);
+  uniforms.uCamUp.value.copy(up);
+  uniforms.uCamForward.value.copy(fwd);
+  uniforms.uCamPos.value.copy(camera.position);
+}
+
+// Render loop
 const clock = new THREE.Clock();
-function render() {
-  const dt = clock.getDelta();
-  const t = clock.elapsedTime;
-
-  // update uniforms
-  if (crystalMat) {
-    crystalMat.uniforms.uTime.value = t;
-    crystalMat.uniforms.uSpeed.value = params.speed;
-    crystalMat.uniforms.uAmp.value = THREE.MathUtils.degToRad(params.foldAmplitudeDeg);
-    crystalMat.uniforms.uInflate.value = params.inflate;
-    crystalMat.uniforms.uPhaseSpread.value = params.phaseSpread;
-
-    crystalMat.uniforms.uStripeDensity.value = params.stripeDensity;
-    crystalMat.uniforms.uStripeWarp.value = params.stripeWarp;
-    crystalMat.uniforms.uStripeSharp.value = params.stripeSharp;
-
-    crystalMat.uniforms.uIridescence.value = params.iridescence;
-    crystalMat.uniforms.uFilmNmMin.value = params.filmNmMin;
-    crystalMat.uniforms.uFilmNmMax.value = params.filmNmMax;
-    crystalMat.uniforms.uRimPower.value = params.rimPower;
-  }
-
-  // trails control
-  afterPass.uniforms[ "damp" ].value = params.trails; // Three's AfterimagePass uses 'damp'
-
-  // idle rotation for presentation
-  if (crystal) {
-    crystal.rotation.y += params.rotateY * dt;
-  }
-
+function render(){
+  uniforms.uTime.value = clock.getElapsedTime();
   controls.update();
-  composer.render();
+  updateCameraBasis();
+  renderer.render(scene, camera);
   requestAnimationFrame(render);
 }
 render();
