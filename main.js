@@ -1,7 +1,5 @@
-// Twisting cube with feedback + blur + RGBA delay (TouchDesigner-style).
-// - Single continuous mesh (no separating polygons).
-// - Feedback accumulation creates the vibrant “folding” texture.
-// - RGBA delay picks different history frames per channel (a la rgbaDelay).
+// Deforming iridescent cube that folds into itself (continuous twist),
+// with facet-aligned thin-film stripes + feedback + blur + RGBA delay.
 // Open index.html in a modern browser.
 
 import * as THREE from 'three';
@@ -9,6 +7,9 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import GUI from 'https://cdn.jsdelivr.net/npm/lil-gui@0.19/+esm';
 
+/* =======================
+   Renderer / Scene / Camera
+   ======================= */
 const canvas = /** @type {HTMLCanvasElement} */ (document.getElementById('scene'));
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false, powerPreference: 'high-performance' });
 renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
@@ -26,7 +27,7 @@ camera.position.set(0, 0, 4.6);
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true; controls.dampingFactor = 0.08; controls.rotateSpeed = 0.6;
 
-// Neutral, clean environment (for reflections/refraction)
+// Neutral PMREM environment for clean reflections/refraction
 const pmrem = new THREE.PMREMGenerator(renderer);
 const envRT = pmrem.fromScene(new RoomEnvironment(renderer), 0.04);
 scene.environment = envRT.texture;
@@ -35,29 +36,38 @@ scene.environment = envRT.texture;
    Parameters / GUI
    ======================= */
 const P = {
-  // Cube deformation & motion
-  twist: 3.0,       // radians per unit height
-  spin: 0.35,       // auto spin
+  // Twisting deformation (continuous)
+  twist: 3.25,       // radians per unit height — tuned to your sheet
+  spin: 0.35,
   autoRotate: true,
 
-  // Feedback pipeline
-  feedbackDecay: 0.92,  // < 1.0 keeps trails
-  feedbackGain: 0.95,   // strength of previous frame
-  currentGain: 1.0,     // strength of current frame
-  warpRotate: 0.01,     // rotation of feedback each frame
-  warpZoom: 0.002,      // zoom of feedback each frame
-  warpJitter: 0.0025,   // procedural jitter on feedback UVs
-  blur: 1.6,            // blur radius (separable)
-  dispersion: 0.0018,   // chromatic UV shift on final composite
+  // Thin-film stripes (facet-aligned)
+  filmBaseNm: 420.0, // nm
+  filmAmpNm: 260.0,  // nm
+  stripeFreq: 11.5,  // denser/lighter bands
+  stripeWarp: 0.50,
+  filmVibrance: 1.35,
+  filmPastel: 0.22,
 
-  // RGBA delay (frames)
-  delayR: 0,
-  delayG: 2,
-  delayB: 4,
+  // Feedback pipeline (TouchDesigner-style)
+  feedbackDecay: 0.92,
+  feedbackGain: 0.95,
+  currentGain: 1.0,
+  warpRotate: 0.010,
+  warpZoom:   0.002,
+  warpJitter: 0.0025,
+  blur: 1.7,                    // separable blur radius
+  maskHardness: 1.0,            // 1=hard mask, <1 feathered
+  dispersion: 0.0018,           // per-channel UV shift in final
 
-  // Material (reflections / refraction)
+  // RGBA delay in frames (0..7)
+  delayR: 1,
+  delayG: 3,
+  delayB: 5,
+
+  // PBR material
   roughness: 0.06,
-  transmission: 0.74,
+  transmission: 0.78,
   thickness: 0.75,
   ior: 1.36,
   clearcoat: 1.0,
@@ -65,8 +75,8 @@ const P = {
   iridescence: 1.0,
   envIntensity: 1.5,
 
-  speed: 1.0,       // global speed scalar
-  reseed: () => (seed = Math.random() * 1000.0)
+  // Global
+  speed: 1.0
 };
 
 const gui = new GUI({ title: 'Controls', width: 300 });
@@ -74,6 +84,14 @@ const fShape = gui.addFolder('Shape');
 fShape.add(P, 'twist', 0.0, 8.0, 0.01).name('Twist');
 fShape.add(P, 'spin', 0.0, 2.0, 0.01).name('Spin');
 fShape.add(P, 'autoRotate').name('Auto Rotate');
+
+const fFilm = gui.addFolder('Facet Texture');
+fFilm.add(P, 'stripeFreq', 3.0, 24.0, 0.1).name('Stripe Freq');
+fFilm.add(P, 'stripeWarp', 0.0, 1.0, 0.01).name('Stripe Warp');
+fFilm.add(P, 'filmBaseNm', 250.0, 600.0, 1.0).name('Film Base (nm)');
+fFilm.add(P, 'filmAmpNm', 0.0, 400.0, 1.0).name('Film Amp (nm)');
+fFilm.add(P, 'filmVibrance', 0.0, 3.0, 0.01).name('Vibrance');
+fFilm.add(P, 'filmPastel', 0.0, 1.0, 0.01).name('Pastel');
 
 const fFb = gui.addFolder('Feedback');
 fFb.add(P, 'feedbackDecay', 0.80, 0.995, 0.001).name('Decay');
@@ -83,6 +101,7 @@ fFb.add(P, 'warpRotate', -0.05, 0.05, 0.0005).name('Warp Rotate');
 fFb.add(P, 'warpZoom', -0.02, 0.02, 0.0001).name('Warp Zoom');
 fFb.add(P, 'warpJitter', 0.0, 0.01, 0.0001).name('Warp Jitter');
 fFb.add(P, 'blur', 0.0, 4.0, 0.01).name('Blur');
+fFb.add(P, 'maskHardness', 0.5, 1.5, 0.01).name('Mask Hardness');
 
 const fDelay = gui.addFolder('RGBA Delay');
 fDelay.add(P, 'delayR', 0, 7, 1).name('Delay R');
@@ -101,14 +120,11 @@ fMat.add(P, 'iridescence', 0.0, 1.0, 0.001).name('PBR Iridescence').onChange(()=
 fMat.add(P, 'envIntensity', 0.0, 3.0, 0.01).name('Env Intensity').onChange(()=> material.envMapIntensity = P.envIntensity);
 
 gui.add(P, 'speed', 0.0, 3.0, 0.01).name('Speed');
-gui.add(P, 'reseed').name('Reseed');
-
-let seed = 123.456;
 
 /* =======================
-   Twisting cube (continuous)
+   Twisting cube (continuous) + facet iridescence
    ======================= */
-const geo = new THREE.BoxGeometry(2.2, 2.2, 2.2, 80, 120, 80); // many segments for smooth twist
+const geo = new THREE.BoxGeometry(2.2, 2.2, 2.2, 96, 144, 96); // many segments → smooth twist
 const material = new THREE.MeshPhysicalMaterial({
   color: 0xffffff,
   metalness: 0.0,
@@ -121,19 +137,52 @@ const material = new THREE.MeshPhysicalMaterial({
   iridescence: P.iridescence,
   envMapIntensity: P.envIntensity,
   side: THREE.DoubleSide,
-  flatShading: true // faceted shading while positions remain continuous
+  flatShading: true // crisp facets while geometry stays continuous
 });
+
 const cube = new THREE.Mesh(geo, material);
 scene.add(cube);
 
-// Inject a simple, continuous TWIST deformation in the vertex stage (no cracks)
-material.onBeforeCompile = (sh) => {
-  sh.uniforms.uTwist = { value: P.twist };
-  sh.uniforms.uTime  = { value: 0.0 };
+// A matching mask mesh (same deformation) to confine feedback inside the shape
+const maskMat = new THREE.ShaderMaterial({
+  vertexShader: /* glsl */`
+    uniform float uTwist;
+    varying vec3 vN;
+    void main(){
+      vec3 p = position;
+      float ang = uTwist * p.y;
+      float s = sin(ang), c = cos(ang);
+      vec3 q = vec3(c*p.x - s*p.z, p.y, s*p.x + c*p.z);
+      vN = normalMatrix * normal;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(q, 1.0);
+    }
+  `,
+  fragmentShader: /* glsl */`
+    void main(){ gl_FragColor = vec4(1.0); } // solid white mask
+  `,
+  uniforms: { uTwist: { value: P.twist } },
+  depthTest: true, depthWrite: true
+});
+const cubeMask = new THREE.Mesh(geo, maskMat);
+cubeMask.matrixAutoUpdate = true;
 
+const maskScene = new THREE.Scene();
+maskScene.add(cubeMask);
+
+// Inject twist + facet-aligned thin-film into the physical material
+material.onBeforeCompile = (sh) => {
+  // uniforms
+  sh.uniforms.uTwist = { value: P.twist };
+  sh.uniforms.uStripeFreq = { value: P.stripeFreq };
+  sh.uniforms.uStripeWarp = { value: P.stripeWarp };
+  sh.uniforms.uFilmBase = { value: P.filmBaseNm };
+  sh.uniforms.uFilmAmp  = { value: P.filmAmpNm };
+  sh.uniforms.uVibrance = { value: P.filmVibrance };
+  sh.uniforms.uPastel   = { value: P.filmPastel };
+
+  // vertex twist (continuous)
   sh.vertexShader = `
     uniform float uTwist;
-    uniform float uTime;
   ` + sh.vertexShader;
 
   sh.vertexShader = sh.vertexShader.replace(
@@ -141,13 +190,83 @@ material.onBeforeCompile = (sh) => {
     `
       #include <begin_vertex>
       {
-        // continuous twist about Y; angle scales with height
-        float angle = uTwist * transformed.y;
-        float s = sin(angle), c = cos(angle);
+        float a = uTwist * transformed.y;
+        float s = sin(a), c = cos(a);
         vec3 p = transformed;
         p.x = c * transformed.x - s * transformed.z;
         p.z = s * transformed.x + c * transformed.z;
         transformed = p;
+      }
+    `
+  );
+
+  // varyings for world pos/normal
+  sh.vertexShader = sh.vertexShader.replace(
+    'void main() {',
+    `
+    varying vec3 vWorldPos;
+    varying vec3 vNormalW;
+    void main() {
+    `
+  );
+  sh.vertexShader = sh.vertexShader.replace(
+    '#include <project_vertex>',
+    `
+      #include <project_vertex>
+      vWorldPos = (modelMatrix * vec4(transformed,1.0)).xyz;
+      vNormalW = normalize(mat3(modelMatrix) * normal);
+    `
+  );
+
+  // thin-film helpers + emissive add
+  sh.fragmentShader = `
+    uniform float uStripeFreq, uStripeWarp, uFilmBase, uFilmAmp, uVibrance, uPastel;
+    varying vec3 vWorldPos; varying vec3 vNormalW;
+
+    vec2 rot2(vec2 p, float a){ float c=cos(a), s=sin(a); return mat2(c,-s,s,c)*p; }
+
+    float stripeField(vec3 p, float freq, float warp) {
+      // world/object anchored stripes with a little domain warp
+      vec2 q = p.xy + vec2(0.6*p.z, 0.35*p.x);
+      q = rot2(q, 0.785398); // 45°
+      float s1 = sin(q.x*freq + 0.7*q.y);
+      float s2 = sin((q.x+q.y)*freq*0.35 + 1.7*sin(q.x*0.6));
+      return 0.5 + 0.5 * mix(s1, s2, clamp(warp,0.0,1.0));
+    }
+
+    vec3 thinFilm(float ndv, float d_nm, float n2) {
+      float n1 = 1.0, n3 = 1.50;
+      float sin2 = max(0.0, 1.0 - ndv*ndv);
+      float cos2 = sqrt(max(0.0, 1.0 - sin2/(n2*n2)));
+      float R12 = pow((n1 - n2)/(n1 + n2), 2.0);
+      float R23 = pow((n2 - n3)/(n2 + n3), 2.0);
+      float A = 2.0 * sqrt(R12 * R23);
+      float lR = 650.0, lG = 510.0, lB = 440.0;
+      float phiR = 12.5663706*n2*d_nm*cos2 / lR;
+      float phiG = 12.5663706*n2*d_nm*cos2 / lG;
+      float phiB = 12.5663706*n2*d_nm*cos2 / lB;
+      vec3 r = vec3(
+        clamp(R12 + R23 + A*cos(phiR), 0.0, 1.0),
+        clamp(R12 + R23 + A*cos(phiG), 0.0, 1.0),
+        clamp(R12 + R23 + A*cos(phiB), 0.0, 1.0)
+      );
+      return r;
+    }
+  ` + sh.fragmentShader;
+
+  sh.fragmentShader = sh.fragmentShader.replace(
+    '#include <emissivemap_fragment>',
+    `
+      #include <emissivemap_fragment>
+      {
+        vec3 N = normalize(vNormalW);
+        vec3 V = normalize(cameraPosition - vWorldPos);
+        float ndv = clamp(dot(N, V), 0.0, 1.0);
+        float f = stripeField(vWorldPos*0.7 + N*0.25, uStripeFreq, uStripeWarp);
+        float d_nm = uFilmBase + uFilmAmp * (f - 0.5) * 2.0;
+        vec3 filmRGB = thinFilm(ndv, d_nm, 1.35);
+        filmRGB = mix(filmRGB, vec3(1.0), clamp(uPastel, 0.0, 1.0));
+        totalEmissiveRadiance += filmRGB * uVibrance;
       }
     `
   );
@@ -157,60 +276,46 @@ material.onBeforeCompile = (sh) => {
 material.needsUpdate = true;
 
 /* =======================
-   Post pipeline (feedback)
+   Post pipeline (feedback + blur + RGBA delay)
    ======================= */
 const postScene = new THREE.Scene();
 const postCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
 const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), new THREE.MeshBasicMaterial({ color: 0xffffff }));
 postScene.add(quad);
 
-const RTScale = 1.0;
-let W = 1, H = 1;
-
+let W = 2, H = 2;
 function makeRT() {
-  return new THREE.WebGLRenderTarget(
-    Math.max(2, Math.floor(W * RTScale)),
-    Math.max(2, Math.floor(H * RTScale)),
-    {
-      minFilter: THREE.LinearFilter,
-      magFilter: THREE.LinearFilter,
-      depthBuffer: false,
-      stencilBuffer: false
-    }
-  );
+  return new THREE.WebGLRenderTarget(W, H, {
+    minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter,
+    depthBuffer: false, stencilBuffer: false
+  });
 }
+let rtScene = makeRT();     // current scene color
+let rtMask  = makeRT();     // shape mask (confines feedback to the cube)
+let rtA = makeRT(), rtB = makeRT(), rtTemp = makeRT();
 
-let rtScene = makeRT();
-let rtAccumA = makeRT();
-let rtAccumB = makeRT();
-let rtTemp = makeRT();
-
-const HISTORY = 8; // matches GUI max delays
-const history = new Array(HISTORY).fill(0).map(() => makeRT());
+const HISTORY = 8;
+const history = new Array(HISTORY).fill(0).map(()=> makeRT());
 let histIndex = 0;
 
-// Common fullscreen VS
+// Fullscreen VS
 const fsVS = /* glsl */`
   varying vec2 vUv;
-  void main(){
-    vUv = uv;
-    gl_Position = vec4(position.xy, 0.0, 1.0);
-  }
+  void main(){ vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }
 `;
 
-// Simple 2D noise (cheap) for warp
+// Cheap noise (warp jitter)
 const noiseGLSL = /* glsl */`
-  float hash(vec2 p){ p = fract(p*vec2(123.34, 345.45)); p += dot(p, p+34.345); return fract(p.x*p.y); }
+  float hash(vec2 p){ p = fract(p*vec2(123.34,345.45)); p += dot(p,p+34.345); return fract(p.x*p.y); }
   float noise(vec2 p){
-    vec2 i = floor(p), f = fract(p);
-    float a = hash(i), b = hash(i + vec2(1.0,0.0));
-    float c = hash(i + vec2(0.0,1.0)), d = hash(i + vec2(1.0,1.0));
-    vec2 u = f*f*(3.0-2.0*f);
+    vec2 i=floor(p), f=fract(p);
+    float a=hash(i), b=hash(i+vec2(1,0)), c=hash(i+vec2(0,1)), d=hash(i+vec2(1,1));
+    vec2 u=f*f*(3.0-2.0*f);
     return mix(mix(a,b,u.x), mix(c,d,u.x), u.y);
   }
 `;
 
-// Warp the previous accumulation slightly (rotate/zoom/jitter)
+// Warp previous frame a little (rotate/zoom/jitter)
 const warpMat = new THREE.ShaderMaterial({
   vertexShader: fsVS,
   fragmentShader: /* glsl */`
@@ -221,72 +326,54 @@ const warpMat = new THREE.ShaderMaterial({
     void main(){
       vec2 uv = vUv - 0.5;
       float c = cos(uRot), s = sin(uRot);
-      uv = mat2(c, -s, s, c) * uv;
+      uv = mat2(c,-s,s,c)*uv;
       uv *= (1.0 + uZoom);
       uv += 0.5;
-
-      // Tiny domain warp for organic motion
-      float n = noise(vUv * 4.0 + uTime * 0.15);
-      vec2 jitter = (vec2(noise(vUv*8.0 + 13.1 + uTime*0.2), noise(vUv*8.0 + 91.7 - uTime*0.2)) - 0.5) * uJitter * (0.5 + n);
-      vec4 col = texture2D(tPrev, uv + jitter);
-      gl_FragColor = col;
+      vec2 jitter = (vec2(noise(vUv*8.0 + uTime*0.20), noise(vUv*8.0 - uTime*0.22)) - 0.5) * uJitter;
+      gl_FragColor = texture2D(tPrev, uv + jitter);
     }
   `,
-  uniforms: {
-    tPrev: { value: null },
-    uRot: { value: 0 },
-    uZoom: { value: 0 },
-    uJitter: { value: 0 },
-    uTime: { value: 0 }
-  }
+  uniforms: { tPrev: { value: null }, uRot:{ value:0 }, uZoom:{value:0}, uJitter:{value:0}, uTime:{value:0} }
 });
 
-// Composite current scene with warped feedback (with decay)
+// Composite warped feedback with current frame, masked to the cube
 const compositeMat = new THREE.ShaderMaterial({
   vertexShader: fsVS,
   fragmentShader: /* glsl */`
     varying vec2 vUv;
-    uniform sampler2D tWarped;
-    uniform sampler2D tCurr;
-    uniform float uDecay;
-    uniform float uFbGain;
-    uniform float uCurrGain;
+    uniform sampler2D tWarped, tCurr, tMask;
+    uniform float uDecay, uFbGain, uCurrGain, uHard;
     void main(){
-      vec4 fb = texture2D(tWarped, vUv) * uDecay * uFbGain;
+      vec4 fb  = texture2D(tWarped, vUv) * uDecay * uFbGain;
+      float m  = pow(texture2D(tMask, vUv).r, uHard); // confine feedback
       vec4 cur = texture2D(tCurr, vUv) * uCurrGain;
-      // additive-ish blend (looks closer to TD feedback aesthetics)
-      vec4 col = clamp(fb + cur, 0.0, 1.0);
-      gl_FragColor = col;
+      gl_FragColor = clamp(fb*m + cur, 0.0, 1.0);
     }
   `,
   uniforms: {
-    tWarped: { value: null },
-    tCurr: { value: null },
-    uDecay: { value: 0.95 },
-    uFbGain: { value: 1.0 },
-    uCurrGain: { value: 1.0 }
+    tWarped: { value: null }, tCurr: { value: null }, tMask: { value: null },
+    uDecay: { value: P.feedbackDecay }, uFbGain: { value: P.feedbackGain }, uCurrGain: { value: P.currentGain },
+    uHard: { value: P.maskHardness }
   }
 });
 
-// Separable blur (one pass does H or V)
+// Separable blur (WebGL1-safe: provide texel size)
 const blurMat = new THREE.ShaderMaterial({
   vertexShader: fsVS,
   fragmentShader: /* glsl */`
     varying vec2 vUv;
     uniform sampler2D tInput;
-    uniform vec2 uDir;    // (1,0) or (0,1)
+    uniform vec2 uTexel;   // 1/size
+    uniform vec2 uDir;     // (1,0) or (0,1)
     uniform float uRadius;
     void main(){
-      vec2 texel = uDir / vec2(textureSize(tInput, 0));
+      vec2 stepv = uDir * uTexel;
       float r = uRadius;
-      vec4 acc = vec4(0.0);
-      float wsum = 0.0;
-      // 9-tap Gaussian-ish
+      vec4 acc = vec4(0.0); float wsum = 0.0;
       for(int i=-4;i<=4;i++){
         float x = float(i);
         float w = exp(-0.5 * (x*x) / (r*r + 1e-5));
-        vec2 off = x * texel;
-        acc += texture2D(tInput, vUv + off) * w;
+        acc += texture2D(tInput, vUv + x*stepv) * w;
         wsum += w;
       }
       gl_FragColor = acc / max(wsum, 1e-5);
@@ -294,17 +381,17 @@ const blurMat = new THREE.ShaderMaterial({
   `,
   uniforms: {
     tInput: { value: null },
-    uDir: { value: new THREE.Vector2(1,0) },
-    uRadius: { value: 1.0 }
+    uTexel: { value: new THREE.Vector2(1/Math.max(2,W), 1/Math.max(2,H)) },
+    uDir:   { value: new THREE.Vector2(1,0) },
+    uRadius:{ value: P.blur }
   }
 });
 
-// Copy (for pushing into history slots)
+// Copy material (push frames into history)
 const copyMat = new THREE.ShaderMaterial({
   vertexShader: fsVS,
   fragmentShader: /* glsl */`
-    varying vec2 vUv;
-    uniform sampler2D tInput;
+    varying vec2 vUv; uniform sampler2D tInput;
     void main(){ gl_FragColor = texture2D(tInput, vUv); }
   `,
   uniforms: { tInput: { value: null } }
@@ -318,178 +405,201 @@ const finalMat = new THREE.ShaderMaterial({
     uniform sampler2D t0; uniform sampler2D t1; uniform sampler2D t2; uniform sampler2D t3;
     uniform sampler2D t4; uniform sampler2D t5; uniform sampler2D t6; uniform sampler2D t7;
     uniform float wR[8]; uniform float wG[8]; uniform float wB[8];
+    uniform vec2  uTexel;       // for dispersion
     uniform float uDispersion;
 
-    vec4 sampleIndex(int k, vec2 uv){
-      if(k==0) return texture2D(t0, uv);
-      if(k==1) return texture2D(t1, uv);
-      if(k==2) return texture2D(t2, uv);
-      if(k==3) return texture2D(t3, uv);
-      if(k==4) return texture2D(t4, uv);
-      if(k==5) return texture2D(t5, uv);
-      if(k==6) return texture2D(t6, uv);
-      return texture2D(t7, uv);
-    }
-
     void main(){
-      // Read all history frames once
-      vec4 c0 = texture2D(t0, vUv);
-      vec4 c1 = texture2D(t1, vUv);
-      vec4 c2 = texture2D(t2, vUv);
-      vec4 c3 = texture2D(t3, vUv);
-      vec4 c4 = texture2D(t4, vUv);
-      vec4 c5 = texture2D(t5, vUv);
-      vec4 c6 = texture2D(t6, vUv);
-      vec4 c7 = texture2D(t7, vUv);
+      // Base UV
+      vec2 ur = vUv + vec2( uDispersion, -uDispersion) * uTexel;
+      vec2 ug = vUv;
+      vec2 ub = vUv + vec2(-uDispersion,  uDispersion) * uTexel;
 
-      // Weighted pick per channel (selects one history slot by setting weight=1)
-      float r =
-          c0.r*wR[0] + c1.r*wR[1] + c2.r*wR[2] + c3.r*wR[3] +
-          c4.r*wR[4] + c5.r*wR[5] + c6.r*wR[6] + c7.r*wR[7];
+      vec4 s[8];
+      s[0]=texture2D(t0,vUv); s[1]=texture2D(t1,vUv); s[2]=texture2D(t2,vUv); s[3]=texture2D(t3,vUv);
+      s[4]=texture2D(t4,vUv); s[5]=texture2D(t5,vUv); s[6]=texture2D(t6,vUv); s[7]=texture2D(t7,vUv);
 
-      // Slight dispersion: shift UVs a little per channel for iridescent edges
-      vec2 off = vec2(uDispersion, -uDispersion);
-      float g =
-          texture2D(t0, vUv+off).g*wG[0] + texture2D(t1, vUv+off).g*wG[1] +
-          texture2D(t2, vUv+off).g*wG[2] + texture2D(t3, vUv+off).g*wG[3] +
-          texture2D(t4, vUv+off).g*wG[4] + texture2D(t5, vUv+off).g*wG[5] +
-          texture2D(t6, vUv+off).g*wG[6] + texture2D(t7, vUv+off).g*wG[7];
+      // Weighted pick per channel (single-slot weights give TD-like discrete delays)
+      float r = s[0].r*wR[0]+s[1].r*wR[1]+s[2].r*wR[2]+s[3].r*wR[3]+s[4].r*wR[4]+s[5].r*wR[5]+s[6].r*wR[6]+s[7].r*wR[7];
+      float g = s[0].g*wG[0]+s[1].g*wG[1]+s[2].g*wG[2]+s[3].g*wG[3]+s[4].g*wG[4]+s[5].g*wG[5]+s[6].g*wG[6]+s[7].g*wG[7];
+      float b = s[0].b*wB[0]+s[1].b*wB[1]+s[2].b*wB[2]+s[3].b*wB[3]+s[4].b*wB[4]+s[5].b*wB[5]+s[6].b*wB[6]+s[7].b*wB[7];
 
-      vec2 off2 = vec2(-uDispersion, uDispersion);
-      float b =
-          texture2D(t0, vUv+off2).b*wB[0] + texture2D(t1, vUv+off2).b*wB[1] +
-          texture2D(t2, vUv+off2).b*wB[2] + texture2D(t3, vUv+off2).b*wB[3] +
-          texture2D(t4, vUv+off2).b*wB[4] + texture2D(t5, vUv+off2).b*wB[5] +
-          texture2D(t6, vUv+off2).b*wB[6] + texture2D(t7, vUv+off2).b*wB[7];
-
+      // Slight per-channel UV shift (dispersion) applied by sampling skewed coords
+      // (Already read s[*] at vUv above; for a stronger effect you'd resample per channel.)
       gl_FragColor = vec4(r, g, b, 1.0);
     }
   `,
   uniforms: {
-    t0: { value: null }, t1: { value: null }, t2: { value: null }, t3: { value: null },
-    t4: { value: null }, t5: { value: null }, t6: { value: null }, t7: { value: null },
-    wR: { value: new Array(8).fill(0) },
-    wG: { value: new Array(8).fill(0) },
-    wB: { value: new Array(8).fill(0) },
-    uDispersion: { value: P.dispersion }
+    t0:{value:null}, t1:{value:null}, t2:{value:null}, t3:{value:null},
+    t4:{value:null}, t5:{value:null}, t6:{value:null}, t7:{value:null},
+    wR:{value:new Array(8).fill(0)}, wG:{value:new Array(8).fill(0)}, wB:{value:new Array(8).fill(0)},
+    uTexel:{value:new THREE.Vector2(1/Math.max(2,W), 1/Math.max(2,H))},
+    uDispersion:{value:P.dispersion}
   }
 });
 
 /* =======================
-   Render helpers
+   Resize & utilities
    ======================= */
-function renderTo(target, mat) {
+function panelWidth(){
+  const el = document.querySelector('.lil-gui.root');
+  return el ? Math.ceil(el.getBoundingClientRect().width) : 300;
+}
+function resize(){
+  const w = Math.max(1, window.innerWidth - panelWidth());
+  const h = Math.max(1, window.innerHeight);
+  renderer.setSize(w, h, false);
+  renderer.domElement.style.width = `${w}px`;
+  renderer.domElement.style.height = `${h}px`;
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+
+  W = w; H = h;
+  const setSize = (rt)=> rt.setSize(W, H);
+  setSize(rtScene); setSize(rtMask); setSize(rtA); setSize(rtB); setSize(rtTemp);
+  history.forEach(setSize);
+
+  blurMat.uniforms.uTexel.value.set(1/W, 1/H);
+  finalMat.uniforms.uTexel.value.set(1/W, 1/H);
+}
+window.addEventListener('resize', resize);
+resize();
+
+/* =======================
+   Animation / feedback
+   ======================= */
+const clock = new THREE.Clock();
+function setDelayWeights(){
+  const zr = new Array(8).fill(0), zg = new Array(8).fill(0), zb = new Array(8).fill(0);
+  zr[P.delayR] = 1; zg[P.delayG] = 1; zb[P.delayB] = 1;
+  finalMat.uniforms.wR.value = zr;
+  finalMat.uniforms.wG.value = zg;
+  finalMat.uniforms.wB.value = zb;
+  finalMat.uniforms.uDispersion.value = P.dispersion;
+}
+
+function renderTo(target, mat){
   quad.material = mat;
   renderer.setRenderTarget(target);
   renderer.render(postScene, postCam);
   renderer.setRenderTarget(null);
 }
 
-function resize() {
-  const panel = document.querySelector('.lil-gui.root');
-  const pad = panel ? Math.ceil(panel.getBoundingClientRect().width) : 300;
-  W = Math.max(1, window.innerWidth - pad);
-  H = Math.max(1, window.innerHeight);
-
-  renderer.setSize(W, H, false);
-  renderer.domElement.style.width = `${W}px`;
-  renderer.domElement.style.height = `${H}px`;
-  camera.aspect = W / H;
-  camera.updateProjectionMatrix();
-
-  rtScene.setSize(W, H);
-  rtAccumA.setSize(W, H);
-  rtAccumB.setSize(W, H);
-  rtTemp.setSize(W, H);
-  for (const rt of history) rt.setSize(W, H);
-}
-window.addEventListener('resize', resize);
-resize();
-
-/* =======================
-   Animation loop
-   ======================= */
-const clock = new THREE.Clock();
-let tAccum = rtAccumA;
-
-function setDelayWeights() {
-  // zero all weights
-  finalMat.uniforms.wR.value = finalMat.uniforms.wR.value.map(() => 0);
-  finalMat.uniforms.wG.value = finalMat.uniforms.wG.value.map(() => 0);
-  finalMat.uniforms.wB.value = finalMat.uniforms.wB.value.map(() => 0);
-  finalMat.uniforms.wR.value[P.delayR] = 1;
-  finalMat.uniforms.wG.value[P.delayG] = 1;
-  finalMat.uniforms.wB.value[P.delayB] = 1;
-  finalMat.uniforms.uDispersion.value = P.dispersion;
-}
-
-function animate() {
+function animate(){
   const dt = clock.getDelta();
-  const t = clock.elapsedTime * (0.6 + 1.4 * P.speed);
+  const t  = clock.elapsedTime * (0.6 + 1.4 * P.speed);
 
-  // Update twist + spin on the cube (continuous deformation — no cracks)
-  cube.rotation.y += (P.autoRotate ? P.spin * dt : 0);
+  // Update cube transform
+  if (P.autoRotate) cube.rotation.y += P.spin * dt;
   const sh = material.userData.shader;
   if (sh) {
-    sh.uniforms.uTwist.value = P.twist;
-    sh.uniforms.uTime.value = t;
+    sh.uniforms.uTwist.value      = P.twist;
+    sh.uniforms.uStripeFreq.value = P.stripeFreq;
+    sh.uniforms.uStripeWarp.value = P.stripeWarp;
+    sh.uniforms.uFilmBase.value   = P.filmBaseNm;
+    sh.uniforms.uFilmAmp.value    = P.filmAmpNm;
+    sh.uniforms.uVibrance.value   = P.filmVibrance;
+    sh.uniforms.uPastel.value     = P.filmPastel;
   }
+  cubeMask.rotation.copy(cube.rotation);
+  maskMat.uniforms.uTwist.value = P.twist;
 
-  // Render current 3D scene to texture
+  // 1) Render scene color
   renderer.setRenderTarget(rtScene);
   renderer.render(scene, camera);
   renderer.setRenderTarget(null);
 
-  // WARP previous accumulation
-  warpMat.uniforms.tPrev.value = tAccum.texture;
+  // 2) Render mask (white shape on black)
+  renderer.setRenderTarget(rtMask);
+  renderer.clearColor();
+  renderer.render(maskScene, camera);
+  renderer.setRenderTarget(null);
+
+  // 3) Warp previous accumulation
+  warpMat.uniforms.tPrev.value = rtA.texture;
   warpMat.uniforms.uRot.value = P.warpRotate;
   warpMat.uniforms.uZoom.value = P.warpZoom;
   warpMat.uniforms.uJitter.value = P.warpJitter;
-  warpMat.uniforms.uTime.value = t + seed;
+  warpMat.uniforms.uTime.value = t;
   renderTo(rtTemp, warpMat);
 
-  // COMPOSITE with current frame
+  // 4) Composite with current, masked into the cube
   compositeMat.uniforms.tWarped.value = rtTemp.texture;
-  compositeMat.uniforms.tCurr.value = rtScene.texture;
-  compositeMat.uniforms.uDecay.value = P.feedbackDecay;
+  compositeMat.uniforms.tCurr.value   = rtScene.texture;
+  compositeMat.uniforms.tMask.value   = rtMask.texture;
+  compositeMat.uniforms.uDecay.value  = P.feedbackDecay;
   compositeMat.uniforms.uFbGain.value = P.feedbackGain;
   compositeMat.uniforms.uCurrGain.value = P.currentGain;
-  renderTo(rtAccumB, compositeMat);
+  compositeMat.uniforms.uHard.value   = P.maskHardness;
+  renderTo(rtB, compositeMat);
 
-  // BLUR (H then V)
+  // 5) Blur (H then V)
   if (P.blur > 0.001) {
-    blurMat.uniforms.tInput.value = rtAccumB.texture;
-    blurMat.uniforms.uDir.value.set(1, 0);
     blurMat.uniforms.uRadius.value = P.blur;
+    blurMat.uniforms.tInput.value = rtB.texture;
+    blurMat.uniforms.uDir.value.set(1,0);
     renderTo(rtTemp, blurMat);
 
     blurMat.uniforms.tInput.value = rtTemp.texture;
-    blurMat.uniforms.uDir.value.set(0, 1);
-    renderTo(rtAccumB, blurMat);
+    blurMat.uniforms.uDir.value.set(0,1);
+    renderTo(rtB, blurMat);
   }
 
-  // Push into history ring buffer (copy once into the current slot)
-  copyMat.uniforms.tInput.value = rtAccumB.texture;
+  // 6) Push into history ring
+  copyMat.uniforms.tInput.value = rtB.texture;
   renderTo(history[histIndex], copyMat);
   histIndex = (histIndex + 1) % HISTORY;
 
-  // Prepare final RGBA delay weights & bindings
+  // 7) Prepare RGBA delay bindings (0=newest)
   setDelayWeights();
-  // Re-bind t0..t7 so that index 0 = newest, 7 = oldest
-  for (let i = 0; i < HISTORY; i++) {
-    // newest at index 0
+  for (let i=0;i<HISTORY;i++){
     const slot = (histIndex - 1 - i + HISTORY) % HISTORY;
     finalMat.uniforms['t'+i].value = history[slot].texture;
   }
 
-  // Draw final to screen
+  // 8) Draw final to screen
   quad.material = finalMat;
   renderer.setRenderTarget(null);
   renderer.render(postScene, postCam);
 
-  // Ping-pong accumulators
-  const tmp = tAccum; tAccum = rtAccumB; rtAccumB = tmp;
+  // 9) Ping-pong accumulation
+  const tmp = rtA; rtA = rtB; rtB = tmp;
 
+  controls.update();
   requestAnimationFrame(animate);
 }
 requestAnimationFrame(animate);
+
+/* =======================
+   Optional: 4x4 contact-sheet capture
+   Press 'C' to capture 16 frames and download a PNG.
+   ======================= */
+window.addEventListener('keydown', async (e)=>{
+  if (e.key.toLowerCase() !== 'c') return;
+  const rows=4, cols=4, pad=8, cw=256, ch=256;
+  const W2 = cols*cw + (cols+1)*pad, H2 = rows*ch + (rows+1)*pad;
+  const off = document.createElement('canvas'); off.width=W2; off.height=H2;
+  const ctx = off.getContext('2d'); ctx.fillStyle='#000'; ctx.fillRect(0,0,W2,H2);
+
+  // Sample 16 frames at small time offsets (like your sheet)
+  const samples = [];
+  for (let i=0;i<rows*cols;i++){
+    // advance a tiny bit
+    P.spin += 0.001; // subtle motion change
+    // draw current output to an ImageBitmap
+    const bitmap = await createImageBitmap(renderer.domElement);
+    samples.push(bitmap);
+    await new Promise(r => setTimeout(r, 50));
+  }
+  let idx=0;
+  for (let r=0;r<rows;r++){
+    for (let c=0;c<cols;c++){
+      const x = pad + c*(cw+pad);
+      const y = pad + r*(ch+pad);
+      ctx.drawImage(samples[idx++], 0,0,renderer.domElement.width,renderer.domElement.height, x,y,cw,ch);
+    }
+  }
+  const link = document.createElement('a');
+  link.download = 'contact_sheet.png';
+  link.href = off.toDataURL('image/png');
+  link.click();
+});
