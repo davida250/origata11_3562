@@ -16,7 +16,7 @@ renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
 renderer.setClearColor(0x000000, 1);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 1.1;
+renderer.toneMappingExposure = 1.15;
 renderer.physicallyCorrectLights = true;
 
 const scene = new THREE.Scene();
@@ -37,28 +37,28 @@ scene.environment = envRT.texture;
    ======================= */
 const P = {
   // Twisting deformation (continuous)
-  twist: 3.25,       // radians per unit height — tuned to your sheet
+  twist: 3.25,       // radians per unit height — tuned towards your sheet
   spin: 0.35,
   autoRotate: true,
 
   // Thin-film stripes (facet-aligned)
-  filmBaseNm: 420.0, // nm
-  filmAmpNm: 260.0,  // nm
-  stripeFreq: 11.5,  // denser/lighter bands
-  stripeWarp: 0.50,
-  filmVibrance: 1.35,
+  filmBaseNm: 430.0, // nm
+  filmAmpNm: 280.0,  // nm
+  stripeFreq: 12.8,  // tuned for diagonal stripes like the sheet
+  stripeWarp: 0.52,
+  filmVibrance: 1.55,
   filmPastel: 0.22,
 
   // Feedback pipeline (TouchDesigner-style)
-  feedbackDecay: 0.92,
-  feedbackGain: 0.95,
-  currentGain: 1.0,
-  warpRotate: 0.010,
-  warpZoom:   0.002,
-  warpJitter: 0.0025,
-  blur: 1.7,                    // separable blur radius
-  maskHardness: 1.0,            // 1=hard mask, <1 feathered
-  dispersion: 0.0018,           // per-channel UV shift in final
+  feedbackDecay: 0.91,
+  feedbackGain: 1.00,
+  currentGain: 1.00,
+  warpRotate: 0.015,
+  warpZoom:   0.003,
+  warpJitter: 0.0018,
+  blur: 1.8,                    // separable blur radius
+  maskHardness: 1.05,           // 1=hard mask, <1 feathered
+  dispersion: 0.0020,           // per-channel UV shift in final
 
   // RGBA delay in frames (0..7)
   delayR: 1,
@@ -68,12 +68,12 @@ const P = {
   // PBR material
   roughness: 0.06,
   transmission: 0.78,
-  thickness: 0.75,
+  thickness: 0.80,
   ior: 1.36,
   clearcoat: 1.0,
   clearcoatRoughness: 0.12,
   iridescence: 1.0,
-  envIntensity: 1.5,
+  envIntensity: 1.6,
 
   // Global
   speed: 1.0
@@ -143,23 +143,19 @@ const material = new THREE.MeshPhysicalMaterial({
 const cube = new THREE.Mesh(geo, material);
 scene.add(cube);
 
-// A matching mask mesh (same deformation) to confine feedback inside the shape
+// Mask mesh (same deformation) to confine feedback inside the silhouette
 const maskMat = new THREE.ShaderMaterial({
   vertexShader: /* glsl */`
     uniform float uTwist;
-    varying vec3 vN;
     void main(){
       vec3 p = position;
       float ang = uTwist * p.y;
       float s = sin(ang), c = cos(ang);
       vec3 q = vec3(c*p.x - s*p.z, p.y, s*p.x + c*p.z);
-      vN = normalMatrix * normal;
       gl_Position = projectionMatrix * modelViewMatrix * vec4(q, 1.0);
     }
   `,
-  fragmentShader: /* glsl */`
-    void main(){ gl_FragColor = vec4(1.0); } // solid white mask
-  `,
+  fragmentShader: /* glsl */` void main(){ gl_FragColor = vec4(1.0); } `,
   uniforms: { uTwist: { value: P.twist } },
   depthTest: true, depthWrite: true
 });
@@ -409,22 +405,24 @@ const finalMat = new THREE.ShaderMaterial({
     uniform float uDispersion;
 
     void main(){
-      // Base UV
+      // Slight per-channel UV shift (dispersion) for iridescent fringes
       vec2 ur = vUv + vec2( uDispersion, -uDispersion) * uTexel;
       vec2 ug = vUv;
       vec2 ub = vUv + vec2(-uDispersion,  uDispersion) * uTexel;
 
-      vec4 s[8];
-      s[0]=texture2D(t0,vUv); s[1]=texture2D(t1,vUv); s[2]=texture2D(t2,vUv); s[3]=texture2D(t3,vUv);
-      s[4]=texture2D(t4,vUv); s[5]=texture2D(t5,vUv); s[6]=texture2D(t6,vUv); s[7]=texture2D(t7,vUv);
+      // Weighted pick per channel (TouchDesigner-like discrete delays)
+      float r =
+          texture2D(t0, ur).r*wR[0]+texture2D(t1, ur).r*wR[1]+texture2D(t2, ur).r*wR[2]+texture2D(t3, ur).r*wR[3]+
+          texture2D(t4, ur).r*wR[4]+texture2D(t5, ur).r*wR[5]+texture2D(t6, ur).r*wR[6]+texture2D(t7, ur).r*wR[7];
 
-      // Weighted pick per channel (single-slot weights give TD-like discrete delays)
-      float r = s[0].r*wR[0]+s[1].r*wR[1]+s[2].r*wR[2]+s[3].r*wR[3]+s[4].r*wR[4]+s[5].r*wR[5]+s[6].r*wR[6]+s[7].r*wR[7];
-      float g = s[0].g*wG[0]+s[1].g*wG[1]+s[2].g*wG[2]+s[3].g*wG[3]+s[4].g*wG[4]+s[5].g*wG[5]+s[6].g*wG[6]+s[7].g*wG[7];
-      float b = s[0].b*wB[0]+s[1].b*wB[1]+s[2].b*wB[2]+s[3].b*wB[3]+s[4].b*wB[4]+s[5].b*wB[5]+s[6].b*wB[6]+s[7].b*wB[7];
+      float g =
+          texture2D(t0, ug).g*wG[0]+texture2D(t1, ug).g*wG[1]+texture2D(t2, ug).g*wG[2]+texture2D(t3, ug).g*wG[3]+
+          texture2D(t4, ug).g*wG[4]+texture2D(t5, ug).g*wG[5]+texture2D(t6, ug).g*wG[6]+texture2D(t7, ug).g*wG[7];
 
-      // Slight per-channel UV shift (dispersion) applied by sampling skewed coords
-      // (Already read s[*] at vUv above; for a stronger effect you'd resample per channel.)
+      float b =
+          texture2D(t0, ub).b*wB[0]+texture2D(t1, ub).b*wB[1]+texture2D(t2, ub).b*wB[2]+texture2D(t3, ub).b*wB[3]+
+          texture2D(t4, ub).b*wB[4]+texture2D(t5, ub).b*wB[5]+texture2D(t6, ub).b*wB[6]+texture2D(t7, ub).b*wB[7];
+
       gl_FragColor = vec4(r, g, b, 1.0);
     }
   `,
@@ -464,10 +462,6 @@ function resize(){
 window.addEventListener('resize', resize);
 resize();
 
-/* =======================
-   Animation / feedback
-   ======================= */
-const clock = new THREE.Clock();
 function setDelayWeights(){
   const zr = new Array(8).fill(0), zg = new Array(8).fill(0), zb = new Array(8).fill(0);
   zr[P.delayR] = 1; zg[P.delayG] = 1; zb[P.delayB] = 1;
@@ -476,7 +470,6 @@ function setDelayWeights(){
   finalMat.uniforms.wB.value = zb;
   finalMat.uniforms.uDispersion.value = P.dispersion;
 }
-
 function renderTo(target, mat){
   quad.material = mat;
   renderer.setRenderTarget(target);
@@ -484,11 +477,15 @@ function renderTo(target, mat){
   renderer.setRenderTarget(null);
 }
 
+/* =======================
+   Animation / feedback
+   ======================= */
+const clock = new THREE.Clock();
 function animate(){
   const dt = clock.getDelta();
   const t  = clock.elapsedTime * (0.6 + 1.4 * P.speed);
 
-  // Update cube transform
+  // Update cube transform + uniforms
   if (P.autoRotate) cube.rotation.y += P.spin * dt;
   const sh = material.userData.shader;
   if (sh) {
@@ -510,7 +507,7 @@ function animate(){
 
   // 2) Render mask (white shape on black)
   renderer.setRenderTarget(rtMask);
-  renderer.clearColor();
+  renderer.clear();
   renderer.render(maskScene, camera);
   renderer.setRenderTarget(null);
 
@@ -583,9 +580,6 @@ window.addEventListener('keydown', async (e)=>{
   // Sample 16 frames at small time offsets (like your sheet)
   const samples = [];
   for (let i=0;i<rows*cols;i++){
-    // advance a tiny bit
-    P.spin += 0.001; // subtle motion change
-    // draw current output to an ImageBitmap
     const bitmap = await createImageBitmap(renderer.domElement);
     samples.push(bitmap);
     await new Promise(r => setTimeout(r, 50));
