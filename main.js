@@ -221,9 +221,9 @@ material.onBeforeCompile = (shader) => {
         vec3 p = transformed;
         float t = uTime * 0.5 + uSeed * 17.0;
 
-        // Smoothly animated fold normals (vec3 weight for ES compatibility)
-        vec3 n1 = normalize(mix(uFoldN1, vec3(sin(t*0.7), cos(t*0.9), sin(t*0.5)), vec3(0.35)));
-        vec3 n2 = normalize(mix(uFoldN2, vec3(cos(t*0.6), sin(t*0.8), cos(t*0.4)), vec3(0.35)));
+        // Smoothly animated fold normals
+        vec3 n1 = normalize(mix(uFoldN1, vec3(sin(t*0.7), cos(t*0.9), sin(t*0.5)), 0.35));
+        vec3 n2 = normalize(mix(uFoldN2, vec3(cos(t*0.6), sin(t*0.8), cos(t*0.4)), 0.35));
 
         float foldI = uFold * (0.7 + 0.3 * sin(uTime*0.6 + uSeed));
         p = foldSpace(p, n1, 1.35, foldI);
@@ -242,7 +242,7 @@ material.onBeforeCompile = (shader) => {
     `
   );
 
-  // ---- Fragment prelude: uniforms + varyings + helpers ----
+  // ---- Fragment prelude: uniforms + varyings + helpers (NO macro defs) ----
   shader.fragmentShader =
   `
     uniform float uTime, uSeed;
