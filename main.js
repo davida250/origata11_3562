@@ -82,13 +82,21 @@ class CrystalGrid {
                 u_colorCycleSpeed: { value: this.settings.colorCycleSpeed },
             },
             vertexShader: `
+                // 'varying' variables are used to pass data from the vertex shader
+                // to the fragment shader.
                 varying vec3 v_normal;
                 varying vec3 v_viewDirection;
                 
                 void main() {
+                    // Calculate the position of the vertex in relation to the camera
                     vec4 modelViewPosition = modelViewMatrix * vec4(position, 1.0);
+                    
+                    // The view direction is the vector from the vertex to the camera (which is at 0,0,0 in view space)
                     v_viewDirection = -modelViewPosition.xyz;
+                    
+                    // Pass the transformed normal to the fragment shader
                     v_normal = normalize(normalMatrix * normal);
+
                     gl_Position = projectionMatrix * modelViewPosition;
                 }
             `,
@@ -99,6 +107,7 @@ class CrystalGrid {
                 uniform float u_fresnelPower;
                 uniform float u_colorCycleSpeed;
 
+                // Receive the variables passed from the vertex shader
                 varying vec3 v_normal;
                 varying vec3 v_viewDirection;
 
@@ -121,6 +130,7 @@ class CrystalGrid {
 
                 void main() {
                     // --- Iridescence (Fresnel Effect) ---
+                    // Here we use the 'v_viewDirection' that was passed from the vertex shader
                     vec3 viewDir = normalize(v_viewDirection);
                     float fresnel = 1.0 - dot(viewDir, v_normal);
                     fresnel = pow(fresnel, u_fresnelPower);
@@ -130,11 +140,10 @@ class CrystalGrid {
                     vec3 baseColor = getPalette(fract(fresnel + colorTime));
 
                     // --- Scan Line Texture ---
-                    // Animate the flicker with noise
                     float lineNoise = noise(gl_FragCoord.xy * 0.1 + u_time);
                     float linePos = gl_FragCoord.y + lineNoise * u_lineFlicker * 20.0;
                     float linePattern = sin(linePos * u_lineFrequency * 0.1);
-                    linePattern = smoothstep(0.4, 0.6, linePattern); // Softens the lines
+                    linePattern = smoothstep(0.4, 0.6, linePattern);
                     
                     // --- Final Composition ---
                     vec3 finalColor = baseColor * (0.5 + 0.5 * linePattern);
