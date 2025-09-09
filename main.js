@@ -1,33 +1,35 @@
-// Iridescent folding crystal — continuous folding (no separation),
-// vibrant thin‑film stripes + reflections & refraction (MeshPhysicalMaterial).
+// Iridescent folding crystal — continuous folds (no separation),
+// vibrant thin‑film stripes + real reflections/refraction (MeshPhysicalMaterial).
+// Open index.html in a modern browser.
 
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { ConvexGeometry } from 'three/addons/geometries/ConvexGeometry.js';
+import { BufferGeometryUtils } from 'three/addons/utils/BufferGeometryUtils.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import GUI from 'https://cdn.jsdelivr.net/npm/lil-gui@0.19/+esm';
 
-/* ===== Controls (right side, minimal) ===== */
+/* ===== Controls (minimal, right-side) ===== */
 const P = {
   // Motion / shape
   speed: 1.0,
-  fold: 1.05,
-  noiseAmp: 0.30,
-  noiseScale: 1.8,
+  fold: 1.10,
+  noiseAmp: 0.26,
+  noiseScale: 1.7,
   autoRotate: true,
 
-  // Vibrant thin‑film texture
-  texFreq: 13.5,
+  // Thin‑film overlay (vibrant texture)
+  texFreq: 14.0,
   texWarp: 0.55,
-  baseNm: 420.0,
-  ampNm: 360.0,
-  vibrance: 1.35,
-  pastel: 0.15,
+  baseNm: 430.0,   // base thickness (nm)
+  ampNm: 380.0,    // variation (nm)
+  vibrance: 1.6,   // emissive boost
+  pastel: 0.22,    // lift toward white (0..1)
 
-  // Physical material (reflections/refraction)
+  // Physical material (reflections/refraction/iridescence)
   envIntensity: 1.6,
-  transmission: 0.78,
-  thickness: 0.75,
+  transmission: 0.82,
+  thickness: 0.8,
   ior: 1.36,
   roughness: 0.06,
   clearcoat: 1.0,
@@ -46,13 +48,13 @@ renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
 renderer.setClearColor(0x000000, 1);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 1.15;
+renderer.toneMappingExposure = 1.1;
 renderer.physicallyCorrectLights = true;
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x000000);
 
-// Neutral analytic environment for glossy reflections/refractions
+// Clean, neutral environment for reflections/refraction (no external HDR)
 const pmrem = new THREE.PMREMGenerator(renderer);
 const envRT = pmrem.fromScene(new RoomEnvironment(renderer), 0.04);
 scene.environment = envRT.texture;
@@ -73,29 +75,42 @@ function mulberry32(a) {
   };
 }
 
-/* ===== Geometry (convex crystal with planar facets) ===== */
+/* ===== Geometry: convex "crystal" with shared vertices =====
+   - ConvexGeometry is non-indexed; we merge vertices to index it.
+   - We bake a continuous smooth normal attribute `aSmooth` for displacement.
+   ======================================================================= */
 function makeConvexShard(seed, scale = 1.0) {
   const rng = mulberry32(Math.floor(seed * 1e6));
   const pts = [];
-  const NUM = 14 + Math.floor(rng() * 8); // 14..21 points
+  const NUM = 16 + Math.floor(rng() * 8); // 16..23 pts
   for (let i = 0; i < NUM; i++) {
     const r = 0.8 + rng() * 0.65;
     const p = new THREE.Vector3((rng()*2-1)*r, (rng()*2-1)*r, (rng()*2-1)*r);
+    // Snap some axes to suggest planar facets
     if (rng() < 0.32) p.x = Math.round(p.x * 2.0) * 0.42;
     if (rng() < 0.32) p.y = Math.round(p.y * 2.0) * 0.42;
     if (rng() < 0.32) p.z = Math.round(p.z * 2.0) * 0.42;
     pts.push(p);
   }
+
+  // Start as non-indexed convex, then merge to create shared vertices.
   let geom = new ConvexGeometry(pts);
-  if (geom.index) geom = geom.toNonIndexed(); // flat-shaded look, continuous surface
-  geom.computeVertexNormals();
+  geom = BufferGeometryUtils.mergeVertices(geom, 1e-4); // <- indexed (no separation)
+  geom.computeVertexNormals(); // smooth normals for continuous displacement
   geom.center();
   geom.scale(scale, scale, scale);
   geom.computeBoundingSphere();
+
+  // Bake a copy of smooth normals for displacement, even if we shade flat.
+  const smooth = geom.getAttribute('normal').array.slice();
+  geom.setAttribute('aSmooth', new THREE.BufferAttribute(new Float32Array(smooth), 3));
   return geom;
 }
 
-/* ===== Material: MeshPhysical + safe shader patch ===== */
+/* ===== Material: MeshPhysical + shader patch (safe) =====
+   - Displacement happens along `aSmooth` (continuous).
+   - Emissive adds thin-film stripes (view dependent).
+   - Keep Three's PBR stack for reflections/refraction/iridescence.        */
 let seed = 0.1375;
 
 const material = new THREE.MeshPhysicalMaterial({
@@ -111,11 +126,12 @@ const material = new THREE.MeshPhysicalMaterial({
   iridescenceIOR: 1.30,
   iridescenceThicknessRange: [P.iriMinNm, P.iriMaxNm],
   envMapIntensity: P.envIntensity,
-  side: THREE.DoubleSide
+  side: THREE.DoubleSide,
+  flatShading: true // keeps the faceted look while geometry remains continuous
 });
 
 material.onBeforeCompile = (shader) => {
-  // ---- uniforms available to GPU (declare in JS and GLSL) ----
+  // --- Uniforms (GPU)
   Object.assign(shader.uniforms, {
     uTime:       { value: 0.0 },
     uSeed:       { value: seed },
@@ -132,13 +148,13 @@ material.onBeforeCompile = (shader) => {
     uPastel:     { value: P.pastel },
   });
 
-  // ---- Varyings + uniform declarations for the VERTEX shader ----
+  // --- Varyings + attribute + uniforms (VERTEX)
   shader.vertexShader =
   `
-    // Custom varyings
+    attribute vec3 aSmooth;
     varying vec3 vWorldPos;
     varying vec3 vNormalW;
-    // Custom uniforms
+
     uniform float uTime;
     uniform float uSeed;
     uniform float uFold;
@@ -148,7 +164,7 @@ material.onBeforeCompile = (shader) => {
     uniform vec3  uFoldN2;
   ` + shader.vertexShader;
 
-  // ---- Helpers and begin main() hook ----
+  // --- Helpers + main() hook
   shader.vertexShader = shader.vertexShader.replace(
     'void main() {',
     `
@@ -200,7 +216,7 @@ material.onBeforeCompile = (shader) => {
       return 42.0 * dot(m*m, vec4(dot(p0,x0), dot(p1,x1), dot(p2,x2), dot(p3,x3)));
     }
 
-    // Triangular-wave folding along plane normal n
+    // Triangular-wave folding mapping along plane normal n
     vec3 foldSpace(vec3 p, vec3 n, float period, float intensity) {
       float d = dot(p, n);
       float tri = abs(mod(d + period, 2.0*period) - period) - 0.5*period;
@@ -212,7 +228,7 @@ material.onBeforeCompile = (shader) => {
     `
   );
 
-  // ---- Apply folding & displacement; compute varyings safely here ----
+  // --- Apply folding & continuous displacement; write varyings
   shader.vertexShader = shader.vertexShader.replace(
     '#include <begin_vertex>',
     `
@@ -221,28 +237,31 @@ material.onBeforeCompile = (shader) => {
         vec3 p = transformed;
         float t = uTime * 0.5 + uSeed * 17.0;
 
-        // Smoothly animated fold normals
-        vec3 n1 = normalize(mix(uFoldN1, vec3(sin(t*0.7), cos(t*0.9), sin(t*0.5)), 0.35));
-        vec3 n2 = normalize(mix(uFoldN2, vec3(cos(t*0.6), sin(t*0.8), cos(t*0.4)), 0.35));
+        // Animated fold axes (keep simple; avoid driver overload issues)
+        vec3 dyn1 = normalize(vec3(sin(t*0.7), cos(t*0.9), sin(t*0.5)));
+        vec3 dyn2 = normalize(vec3(cos(t*0.6), sin(t*0.8), cos(t*0.4)));
+        vec3 n1 = normalize(uFoldN1 * 0.65 + dyn1 * 0.35);
+        vec3 n2 = normalize(uFoldN2 * 0.65 + dyn2 * 0.35);
 
         float foldI = uFold * (0.7 + 0.3 * sin(uTime*0.6 + uSeed));
         p = foldSpace(p, n1, 1.35, foldI);
         p = foldSpace(p, n2, 1.05, foldI * 0.66);
 
+        // Continuous displacement along baked smooth normal (no cracks)
+        vec3 smoothN = normalize(aSmooth);
         float ns = snoise(p * uNoiseScale + vec3(0.0, t*0.6, t*0.3) + uSeed);
-        vec3 gNormal = normalize(normal);
-        p += gNormal * (uNoiseAmp * ns);
+        p += smoothN * (uNoiseAmp * ns);
 
         transformed = p;
 
-        // World-space varyings (keep spaces consistent with cameraPosition)
+        // World-space varyings
         vWorldPos = (modelMatrix * vec4(transformed, 1.0)).xyz;
-        vNormalW  = normalize(mat3(modelMatrix) * gNormal);
+        vNormalW  = normalize(mat3(modelMatrix) * smoothN);
       }
     `
   );
 
-  // ---- Fragment prelude: uniforms + varyings + helpers (NO macro defs) ----
+  // --- Fragment prelude: uniforms + varyings + helpers (no macro defines)
   shader.fragmentShader =
   `
     uniform float uTime, uSeed;
@@ -279,7 +298,7 @@ material.onBeforeCompile = (shader) => {
     }
   ` + shader.fragmentShader;
 
-  // ---- Add emissive contribution using our thin-film field ----
+  // --- Add emissive contribution (vibrant stripes)
   shader.fragmentShader = shader.fragmentShader.replace(
     '#include <emissivemap_fragment>',
     `
@@ -302,7 +321,6 @@ material.onBeforeCompile = (shader) => {
 
   material.userData.shader = shader;
 };
-
 material.needsUpdate = true;
 
 /* ===== Mesh ===== */
@@ -312,12 +330,11 @@ scene.add(shard);
 
 /* ===== GUI ===== */
 const gui = new GUI({ title: 'Controls', width: 300 });
-
 const fTex = gui.addFolder('Texture');
 fTex.add(P, 'texFreq', 3.0, 28.0, 0.1).name('Frequency').onChange(syncUniforms);
 fTex.add(P, 'texWarp', 0.0, 1.0, 0.01).name('Warp').onChange(syncUniforms);
 fTex.add(P, 'baseNm', 250.0, 600.0, 1.0).name('Base (nm)').onChange(syncUniforms);
-fTex.add(P, 'ampNm', 0.0, 450.0, 1.0).name('Variation (nm)').onChange(syncUniforms);
+fTex.add(P, 'ampNm', 0.0, 500.0, 1.0).name('Variation (nm)').onChange(syncUniforms);
 fTex.add(P, 'vibrance', 0.0, 3.0, 0.01).name('Vibrance').onChange(syncUniforms);
 fTex.add(P, 'pastel', 0.0, 1.0, 0.01).name('Pastel').onChange(syncUniforms);
 
