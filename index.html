@@ -1,33 +1,50 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Folding Holographic Shape</title>
-    <style>
-        body {
-            margin: 0;
-            overflow: hidden;
-            background-color: #000000;
-        }
-        canvas {
-            display: block;
-        }
-    </style>
+  <meta charset="utf-8" />
+  <title>Folding Iridescent Polyhedron – Three.js</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    html, body { height: 100%; margin: 0; background: #000; color: #ddd; font-family: system-ui, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }
+    .layout {
+      display: grid;
+      grid-template-columns: 1fr 300px;
+      grid-template-rows: 100%;
+      height: 100%;
+      width: 100%;
+    }
+    #viewport { position: relative; overflow: hidden; }
+    #ui { background: rgba(12,12,12,0.96); border-left: 1px solid #1a1a1a; padding: 10px 8px; }
+    .note {
+      position: absolute; left: 12px; bottom: 12px; color: #9aa; opacity: 0.8;
+      font-size: 12px; line-height: 1.3; pointer-events: none;
+      text-shadow: 0 1px 0 rgba(0,0,0,0.6);
+    }
+    canvas { display: block; }
+    a, a:visited { color: #9bd; text-decoration: none; }
+  </style>
+
+  <!-- Import maps for Three.js + examples -->
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://unpkg.com/three@0.165.0/build/three.module.js",
+        "three/addons/": "https://unpkg.com/three@0.165.0/examples/jsm/"
+      }
+    }
+  </script>
 </head>
 <body>
-    <canvas id="webgl"></canvas>
+  <div class="layout">
+    <div id="viewport">
+      <div class="note">
+        Orbit: drag / wheel · Toggle pause: <b>space</b><br/>
+        Goal: one evolving shape that, over time, matches snapshots in your 4×4 contact sheet.
+      </div>
+    </div>
+    <div id="ui"></div>
+  </div>
 
-    <script type="importmap">
-        {
-            "imports": {
-                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
-                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/",
-                "lil-gui": "https://cdn.jsdelivr.net/npm/lil-gui@0.19/+esm"
-            }
-        }
-    </script>
-
-    <script type="module" src="main.js"></script>
+  <script type="module" src="./main.js"></script>
 </body>
 </html>
