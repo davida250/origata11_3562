@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import GUI from 'lil-gui';
 
 // --- Scene Setup ---
 const scene = new THREE.Scene();
@@ -20,7 +21,6 @@ controls.autoRotate = true;
 controls.autoRotateSpeed = 0.5;
 
 // --- Load Texture ---
-// This texture provides the base iridescent color and linear patterns.
 const textureLoader = new THREE.TextureLoader();
 const holographicTexture = textureLoader.load(
     'https://upload.wikimedia.org/wikipedia/commons/8/82/Holographic_texture_02.jpg',
@@ -30,15 +30,15 @@ const holographicTexture = textureLoader.load(
     }
 );
 
-// --- UI Sliders ---
-const ui = {
-    speed: document.getElementById('speed'),
-    distortion: document.getElementById('distortion'),
-    fresnel: document.getElementById('fresnel'),
+// --- lil-gui Setup ---
+const gui = new GUI();
+const settings = {
+    speed: 0.2,
+    distortion: 0.5,
+    fresnel: 1.8
 };
 
 // --- Shaders ---
-
 const vertexShader = `
     uniform float uTime;
     uniform float uSpeed;
@@ -48,7 +48,7 @@ const vertexShader = `
     varying vec3 vNormal;
     varying vec3 vViewPosition;
 
-    // Simplex 3D Noise - used for organic, smooth procedural values
+    // Simplex 3D Noise for smooth, organic procedural values
     // Author: Ashima Arts
     vec3 mod289(vec3 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
     vec4 mod289(vec4 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
@@ -106,16 +106,9 @@ const vertexShader = `
         vNormal = normal;
         
         // --- Vertex Displacement ---
-        // This is the core logic for the folding effect.
-        // We use two layers of noise ("octaves") for more complex folding.
-        // The first layer creates the large, slow folds.
         float noiseTime = uTime * uSpeed;
         float largeFolds = snoise(position * 0.5 + noiseTime);
-        
-        // The second layer adds smaller, faster details on top.
         float smallFolds = snoise(position * 2.5 + noiseTime * 1.5);
-
-        // Combine the noise and apply it along the vertex normal to push/pull the vertex.
         float displacement = (largeFolds * 0.7 + smallFolds * 0.3) * uDistortion;
         vec3 newPosition = position + normal * displacement;
 
@@ -134,38 +127,30 @@ const fragmentShader = `
     varying vec3 vViewPosition;
 
     void main() {
-        // --- Base Color from Texture ---
-        // We tile the texture (vUv * 2.0) to make the pattern finer.
+        // Base Color from Texture
         vec4 textureColor = texture2D(uTexture, vUv * 2.0);
         
-        // --- Fresnel Effect for iridescent highlights ---
-        // This calculates how much a surface is facing the camera.
-        // Edges will have a higher fresnel value, creating a rim-light effect.
+        // Fresnel Effect for iridescent highlights
         vec3 viewDirection = normalize(vViewPosition);
         float fresnel = 1.0 - dot(normalize(vNormal), viewDirection);
-        fresnel = pow(fresnel, uFresnelPower); // Power controls the sharpness of the glow
+        fresnel = pow(fresnel, uFresnelPower);
 
-        // --- Final Color ---
-        // We add the bright fresnel highlight to the texture color.
+        // Final Color
         vec3 finalColor = textureColor.rgb + fresnel;
-
         gl_FragColor = vec4(finalColor, 1.0);
     }
 `;
 
-
 // --- Geometry and Material ---
-// An Icosahedron gives us a complex starting shape.
-// Higher detail (the second parameter, 15) gives a smoother deformation.
 const geometry = new THREE.IcosahedronGeometry(1.2, 15);
 const material = new THREE.ShaderMaterial({
     vertexShader,
     fragmentShader,
     uniforms: {
         uTime: { value: 0 },
-        uSpeed: { value: parseFloat(ui.speed.value) },
-        uDistortion: { value: parseFloat(ui.distortion.value) },
-        uFresnelPower: { value: parseFloat(ui.fresnel.value) },
+        uSpeed: { value: settings.speed },
+        uDistortion: { value: settings.distortion },
+        uFresnelPower: { value: settings.fresnel },
         uTexture: { value: holographicTexture }
     },
 });
@@ -173,17 +158,15 @@ const material = new THREE.ShaderMaterial({
 const mesh = new THREE.Mesh(geometry, material);
 scene.add(mesh);
 
-// --- UI Listeners ---
-ui.speed.addEventListener('input', (event) => {
-    material.uniforms.uSpeed.value = parseFloat(event.target.value);
+// --- UI Listeners via lil-gui ---
+gui.add(settings, 'speed', 0, 1, 0.01).name('Animation Speed').onChange(value => {
+    material.uniforms.uSpeed.value = value;
 });
-
-ui.distortion.addEventListener('input', (event) => {
-    material.uniforms.uDistortion.value = parseFloat(event.target.value);
+gui.add(settings, 'distortion', 0, 2, 0.01).name('Distortion Amount').onChange(value => {
+    material.uniforms.uDistortion.value = value;
 });
-
-ui.fresnel.addEventListener('input', (event) => {
-    material.uniforms.uFresnelPower.value = parseFloat(event.target.value);
+gui.add(settings, 'fresnel', 0.1, 5.0, 0.1).name('Highlight Power').onChange(value => {
+    material.uniforms.uFresnelPower.value = value;
 });
 
 // --- Handle Window Resize ---
@@ -199,17 +182,9 @@ const clock = new THREE.Clock();
 
 function animate() {
     const elapsedTime = clock.getElapsedTime();
-
-    // Update shader time uniform for animation
     material.uniforms.uTime.value = elapsedTime;
-
-    // Update orbit controls
     controls.update();
-
-    // Render the scene
     renderer.render(scene, camera);
-
-    // Call animate again on the next frame
     requestAnimationFrame(animate);
 }
 
