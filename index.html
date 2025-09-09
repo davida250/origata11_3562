@@ -1,104 +1,38 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <title>Origata v0.29</title>
-  <meta name="theme-color" content="#050509" />
-  <style>
-    html, body { height: 100%; margin: 0; background: #050509; }
-    #app { position: fixed; inset: 0; }
-    .brand {
-      position: fixed; left: 12px; top: 10px; color: #a6b1c2;
-      font: 12px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      user-select: none; opacity: 0.9;
-    }
-    @media (max-width: 560px) { .brand { display: none; } }
-    .hud {
-      position: fixed; left: 12px; bottom: 12px; right: 12px; z-index: 10;
-      display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-      gap: 8px; align-items: center;
-      font: 12px/1.1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    }
-    .hud * { color: #e7f2ff; }
-    .hud select, .hud button, .hud input[type="range"] {
-      padding: 8px 12px; background: #11131a; border: 1px solid #2a3244; border-radius: 6px; cursor: pointer;
-    }
-    .hud label { display: grid; gap: 4px; }
-    .hud button:hover, .hud select:hover, .hud input[type="range"]:hover { background: #151a22; }
-    .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-    .muted { opacity: 0.8 }
-  </style>
-
-  <!-- ESM polyfill -->
-  <script async src="https://unpkg.com/es-module-shims@2.6.2/dist/es-module-shims.js"></script>
-
-  <!-- Import map: three.js + lil-gui -->
-  <script type="importmap">
-  {
-    "imports": {
-      "three": "https://cdn.jsdelivr.net/npm/three@0.179.1/build/three.module.js",
-      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.179.1/examples/jsm/",
-      "lil-gui": "https://cdn.jsdelivr.net/npm/lil-gui@0.20.0/dist/lil-gui.esm.js"
-    }
-  }
-  </script>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Holographic Crystal Grid</title>
+    <style>
+        body {
+            margin: 0;
+            background-color: #000000;
+            color: white;
+            font-family: 'Inter', sans-serif;
+            overflow: hidden; /* Hide scrollbars */
+        }
+        #webgl-canvas {
+            position: fixed;
+            top: 0;
+            left: 0;
+            outline: none;
+        }
+    </style>
 </head>
 <body>
-  <div id="app"></div>
-  <div class="brand">Origata v0.29 - drag to orbit, wheel to zoom</div>
+    <canvas id="webgl-canvas"></canvas>
 
-  <div class="hud">
-    <div class="row">
-      <label>
-        Model / Preset
-        <select id="preset">
-          <optgroup label="Primitives">
-            <option value="half-vertical-valley" selected>Book Fold</option>
-            <option value="gate-valley">Gate Fold</option>
-          </optgroup>
-        </select>
-      </label>
-      <button id="btnApply">Apply</button>
-    </div>
-
-    <div class="row">
-      <label>
-        Fold Progress
-        <input id="progress" type="range" min="0" max="1" step="0.001" value="0" />
-      </label>
-      <button id="btnAnim">Play</button>
-      <button id="btnReset">Reset</button>
-      <button id="btnStepPrev">◀ Step</button>
-      <button id="btnStepNext">Step ▶</button>
-    </div>
-
-    <div class="row">
-      <label title="Left = 0.2× slower, Mid = 1×, Right = 5× faster">
-        Speed (×0.2 … ×5)
-        <input id="speed" type="range" min="0" max="1" step="0.001" value="0.5" />
-      </label>
-      <label>
-        Easing
-        <select id="easing">
-          <option value="linear">linear</option>
-          <option value="smoothstep" selected>smoothstep</option>
-          <option value="easeInOutCubic">easeInOutCubic</option>
-        </select>
-      </label>
-      <span id="stepInfo" class="muted">Step 1/1</span>
-    </div>
-
-    <div class="row">
-      <button id="btnSnap" title="Save current frame as PNG">Save PNG</button>
-      <label class="muted">Entity FX Inc / 2025</label>
-    </div>
-  </div>
-
-  <script type="module" src="./main.js"></script>
-  <noscript>This page needs JavaScript enabled.</noscript>
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://unpkg.com/three@0.165.0/build/three.module.js",
+            "three/addons/": "https://unpkg.com/three@0.165.0/examples/jsm/",
+            "lil-gui": "https://cdn.jsdelivr.net/npm/lil-gui@0.19/+esm"
+        }
+    }
+    </script>
+    
+    <script type="module" src="main.js"></script>
 </body>
 </html>
-
-
-
