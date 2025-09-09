@@ -1,5 +1,5 @@
-// Iridescent folding crystal — continuous folding, vibrant thin‑film stripes,
-// with reflections & refraction via MeshPhysicalMaterial.
+// Iridescent folding crystal — continuous folding (no separation),
+// vibrant thin‑film stripes plus real reflections & refraction (PBR).
 
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
@@ -7,9 +7,9 @@ import { ConvexGeometry } from 'three/addons/geometries/ConvexGeometry.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import GUI from 'https://cdn.jsdelivr.net/npm/lil-gui@0.19/+esm';
 
-/* ========== Minimal controls ========== */
+/* ===== Controls (right side, minimal) ===== */
 const P = {
-  // Motion / fold
+  // Motion / shape
   speed: 1.0,
   fold: 1.05,
   noiseAmp: 0.30,
@@ -39,7 +39,7 @@ const P = {
   reseed: () => reseed(true),
 };
 
-/* ========== Renderer / Scene ========== */
+/* ===== Renderer / Scene ===== */
 const canvas = /** @type {HTMLCanvasElement} */ (document.getElementById('scene'));
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false, powerPreference: 'high-performance' });
 renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
@@ -52,18 +52,18 @@ renderer.physicallyCorrectLights = true;
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x000000);
 
-// Clean, neutral environment for reflections/refraction
+// Neutral analytic environment for glossy reflections/refractions
 const pmrem = new THREE.PMREMGenerator(renderer);
 const envRT = pmrem.fromScene(new RoomEnvironment(renderer), 0.04);
 scene.environment = envRT.texture;
 
-/* ========== Camera / Controls ========== */
+/* ===== Camera / Controls ===== */
 const camera = new THREE.PerspectiveCamera(32, 1, 0.1, 100);
 camera.position.set(0, 0, 4.8);
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true; controls.dampingFactor = 0.08; controls.rotateSpeed = 0.6;
 
-/* ========== Utilities ========== */
+/* ===== Utilities ===== */
 function mulberry32(a) {
   return function () {
     let t = (a += 0x6D2B79F5);
@@ -73,11 +73,11 @@ function mulberry32(a) {
   };
 }
 
-/* ========== Geometry (convex crystal) ========== */
+/* ===== Geometry (convex crystal with planar facets) ===== */
 function makeConvexShard(seed, scale = 1.0) {
   const rng = mulberry32(Math.floor(seed * 1e6));
   const pts = [];
-  const NUM = 14 + Math.floor(rng() * 8); // 14..21
+  const NUM = 14 + Math.floor(rng() * 8); // 14..21 points
   for (let i = 0; i < NUM; i++) {
     const r = 0.8 + rng() * 0.65;
     const p = new THREE.Vector3((rng()*2-1)*r, (rng()*2-1)*r, (rng()*2-1)*r);
@@ -87,7 +87,7 @@ function makeConvexShard(seed, scale = 1.0) {
     pts.push(p);
   }
   let geom = new ConvexGeometry(pts);
-  if (geom.index) geom = geom.toNonIndexed(); // flat-shaded facets, continuous surface
+  if (geom.index) geom = geom.toNonIndexed(); // flat-shaded look, continuous surface
   geom.computeVertexNormals();
   geom.center();
   geom.scale(scale, scale, scale);
@@ -95,7 +95,7 @@ function makeConvexShard(seed, scale = 1.0) {
   return geom;
 }
 
-/* ========== Material: Physical + safe shader patch ========== */
+/* ===== Material: MeshPhysical + safe shader patch ===== */
 let seed = 0.1375;
 
 const material = new THREE.MeshPhysicalMaterial({
@@ -115,7 +115,7 @@ const material = new THREE.MeshPhysicalMaterial({
 });
 
 material.onBeforeCompile = (shader) => {
-  // --- custom uniforms
+  // ---- uniforms available to GPU (declare in JS and GLSL) ----
   Object.assign(shader.uniforms, {
     uTime:       { value: 0.0 },
     uSeed:       { value: seed },
@@ -132,14 +132,23 @@ material.onBeforeCompile = (shader) => {
     uPastel:     { value: P.pastel },
   });
 
-  // --- varyings (world pos & world normal)
+  // ---- Varyings + uniform declarations for the VERTEX shader ----
   shader.vertexShader =
-    `
+  `
+    // Custom varyings
     varying vec3 vWorldPos;
     varying vec3 vNormalW;
-    ` + shader.vertexShader;
+    // Custom uniforms
+    uniform float uTime;
+    uniform float uSeed;
+    uniform float uFold;
+    uniform float uNoiseAmp;
+    uniform float uNoiseScale;
+    uniform vec3  uFoldN1;
+    uniform vec3  uFoldN2;
+  ` + shader.vertexShader;
 
-  // --- helpers + main hook (vertex)
+  // ---- Helpers and begin main() hook ----
   shader.vertexShader = shader.vertexShader.replace(
     'void main() {',
     `
@@ -203,7 +212,7 @@ material.onBeforeCompile = (shader) => {
     `
   );
 
-  // --- apply folding & displacement; compute varyings safely here
+  // ---- Apply folding & displacement; compute varyings safely here ----
   shader.vertexShader = shader.vertexShader.replace(
     '#include <begin_vertex>',
     `
@@ -211,27 +220,31 @@ material.onBeforeCompile = (shader) => {
       {
         vec3 p = transformed;
         float t = uTime * 0.5 + uSeed * 17.0;
-        vec3 n1 = normalize(mix(uFoldN1, vec3(sin(t*0.7), cos(t*0.9), sin(t*0.5)), 0.35));
-        vec3 n2 = normalize(mix(uFoldN2, vec3(cos(t*0.6), sin(t*0.8), cos(t*0.4)), 0.35));
+
+        // Smoothly animated fold normals (use vec3 weight for GLSL ES compatibility)
+        vec3 n1 = normalize(mix(uFoldN1, vec3(sin(t*0.7), cos(t*0.9), sin(t*0.5)), vec3(0.35)));
+        vec3 n2 = normalize(mix(uFoldN2, vec3(cos(t*0.6), sin(t*0.8), cos(t*0.4)), vec3(0.35)));
+
         float foldI = uFold * (0.7 + 0.3 * sin(uTime*0.6 + uSeed));
         p = foldSpace(p, n1, 1.35, foldI);
         p = foldSpace(p, n2, 1.05, foldI * 0.66);
 
         float ns = snoise(p * uNoiseScale + vec3(0.0, t*0.6, t*0.3) + uSeed);
-        p += normalize(objectNormal) * (uNoiseAmp * ns);
+        vec3 gNormal = normalize(normal);
+        p += gNormal * (uNoiseAmp * ns);
 
         transformed = p;
 
-        // World-space varyings (don’t rely on internal chunks)
+        // World-space varyings (don’t rely on internal worldpos chunk order)
         vWorldPos = (modelMatrix * vec4(transformed, 1.0)).xyz;
-        vNormalW  = normalize(mat3(modelMatrix) * normalize(objectNormal));
+        vNormalW  = normalize(mat3(normalMatrix) * gNormal);
       }
     `
   );
 
-  // --- fragment prelude (uniforms + varyings + helpers)
+  // ---- Fragment prelude: uniforms + varyings + helpers ----
   shader.fragmentShader =
-    `
+  `
     #define saturate(a) clamp(a,0.0,1.0)
     uniform float uTime, uSeed;
     uniform float uTexFreq, uTexWarp, uBaseNm, uAmpNm, uVibrance, uPastel;
@@ -265,9 +278,9 @@ material.onBeforeCompile = (shader) => {
       float rB = clamp(R12 + R23 + A * cos(phiB), 0.0, 1.0);
       return vec3(rR, rG, rB);
     }
-    ` + shader.fragmentShader;
+  ` + shader.fragmentShader;
 
-  // --- add emissive contribution using our film
+  // ---- Add emissive contribution using our thin-film field ----
   shader.fragmentShader = shader.fragmentShader.replace(
     '#include <emissivemap_fragment>',
     `
@@ -293,12 +306,12 @@ material.onBeforeCompile = (shader) => {
 
 material.needsUpdate = true;
 
-/* ========== Mesh ========== */
+/* ===== Mesh ===== */
 const shard = new THREE.Mesh(makeConvexShard(seed, 1.0), material);
 shard.rotation.set(0.32, -0.18, 0.12);
 scene.add(shard);
 
-/* ========== GUI (right side, minimal) ========== */
+/* ===== GUI ===== */
 const gui = new GUI({ title: 'Controls', width: 300 });
 
 const fTex = gui.addFolder('Texture');
@@ -360,9 +373,8 @@ function reseed(rebuildGeometry = false) {
     shard.geometry = g;
   }
 }
-syncUniforms();
 
-/* ========== Resize ========== */
+/* ===== Resize ===== */
 function panelWidth() {
   const el = document.querySelector('.lil-gui.root');
   return el ? Math.ceil(el.getBoundingClientRect().width) : 300;
@@ -379,10 +391,9 @@ function onResize() {
 window.addEventListener('resize', onResize);
 onResize();
 
-/* ========== Animate ========== */
+/* ===== Animate ===== */
 const clock = new THREE.Clock();
 let time = 0;
-
 function animate() {
   const dt = clock.getDelta();
   time += dt * (0.6 + P.speed * 1.4);
