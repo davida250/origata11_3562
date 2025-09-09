@@ -9,8 +9,8 @@
             margin: 0;
             background-color: #000000;
             color: white;
-            font-family: 'Inter', sans-serif;
-            overflow: hidden; /* Hide scrollbars */
+            font-family: sans-serif;
+            overflow: hidden;
         }
         #webgl-canvas {
             position: fixed;
@@ -18,9 +18,16 @@
             left: 0;
             outline: none;
         }
+        #gui-container {
+            position: fixed;
+            top: 0;
+            right: 0;
+            z-index: 100;
+        }
     </style>
 </head>
 <body>
+    <div id="gui-container"></div>
     <canvas id="webgl-canvas"></canvas>
 
     <script type="importmap">
