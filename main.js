@@ -1,17 +1,12 @@
 // Origata — SDF folding + thin-film facet texture + Feedback/RGBA delay
-// Frustum-corner ray construction (robust for raymarchers) + typed-array uniforms.
-// References: TouchDesigner Feedback TOP & rgbaDelay, tri-planar mapping, thin-film iridescence, raymarching frustum corners.
-// TD Feedback: https://docs.derivative.ca/Feedback_TOP
-// TD rgbaDelay: https://docs.derivative.ca/Palette%3ArgbaDelay
-// Tri-planar mapping: https://catlikecoding.com/unity/tutorials/advanced-rendering/triplanar-mapping/
-// Thin film iridescence (DerSchmale): https://github.com/DerSchmale/threejs-thin-film-iridescence
-// Frustum corner rays: https://adrianb.io/2016/10/01/raymarching.html
+// Hardened: typed-array uniform weights, history prefill, fixed compositor bug.
+// Key techniques & references cited after the code.
 
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import GUI from 'https://cdn.jsdelivr.net/npm/lil-gui@0.19/+esm';
 
-/* ────────────────────────── Renderer / Cameras ────────────────────────── */
+/* ───────────── Renderer / viewing camera ───────────── */
 const canvas = document.getElementById('scene');
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false, powerPreference: 'high-performance' });
 renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
@@ -20,17 +15,17 @@ renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.0;
 
-// Fullscreen scene (all passes)
+// Fullscreen quad scene for all passes
 const fsScene = new THREE.Scene();
 const fsCam   = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
 
-// View camera used to define rays (and orbit)
+// Perspective view camera used to define world rays and orbit
 const viewCam = new THREE.PerspectiveCamera(30, 1, 0.1, 20);
 viewCam.position.set(0, 0, 4.0);
 const controls = new OrbitControls(viewCam, renderer.domElement);
 controls.enableDamping = true; controls.dampingFactor = 0.08; controls.rotateSpeed = 0.6;
 
-/* ───────────────────────────── Controls ───────────────────────────── */
+/* ───────────── Controls ───────────── */
 const P = {
   cycleSeconds: 16, speed: 1.0, autoRotate: true, spin: 0.15,
 
@@ -79,7 +74,7 @@ fF.add(P, 'blurRadius', 0.0, 4.0, 0.01).name('Blur');
 fF.add(P, 'maskHardness', 0.5, 1.5, 0.01).name('Mask Hardness');
 fF.add(P, 'dispersion', 0.0, 0.01, 0.0001).name('Dispersion');
 
-/* ───────────────────────────── SDF Pass ───────────────────────────── */
+/* ───────────── SDF raymarch pass ───────────── */
 const fsGeo = new THREE.PlaneGeometry(2, 2);
 const sdfMat = new THREE.ShaderMaterial({
   uniforms: {
@@ -132,20 +127,16 @@ const sdfMat = new THREE.ShaderMaterial({
       return p + n * delta;
     }
 
-    // Scene SDF: box + continuous plane folds (angular silhouettes, no separation)
+    // Scene SDF: box + continuous plane folds (angular silhouettes, single solid)
     float sdScene(vec3 p){
-      // subtle motion + twist
-      p = rotX(p, 0.2*sin(uTime*0.21));
-      float a = uTwist * p.y;
+      p = rotX(p, 0.2*sin(uTime*0.21));     // subtle global motion
+      float a = uTwist * p.y;               // mild twist (kept subtle)
       p.xz = mat2(cos(a),-sin(a), sin(a),cos(a)) * p.xz;
 
-      // two independent folds
       p = foldTriWave(p, normalize(vec3(1,0,0)), uFoldP1, uFoldI1);
       p = foldTriWave(p, normalize(vec3(0,1,0)), uFoldP2, uFoldI2);
 
-      // base primitive (box)
-      float d = sdBox(p, vec3(1.0));
-      return d;
+      return sdBox(p, vec3(1.0));
     }
 
     vec2 raymarch(vec3 ro, vec3 rd){
@@ -169,7 +160,7 @@ const sdfMat = new THREE.ShaderMaterial({
                         h.xxx*sdScene(p+h.xxx*e) );
     }
 
-    // Tri-planar stripe field (facet-aligned)
+    // Tri-planar stripe field (facet aligned)
     vec3 triWeights(vec3 n){ vec3 w = pow(abs(n), vec3(8.0)); return w/(w.x+w.y+w.z+1e-5); }
     float stripe2D(vec2 uv, float f){
       float s = sin(uv.x*f)*0.7 + sin((uv.x+uv.y)*f*0.33)*0.3;
@@ -189,7 +180,7 @@ const sdfMat = new THREE.ShaderMaterial({
       return 0.5 + 0.5*(s + 0.45*band);
     }
 
-    // Thin-film interference (RGB phase)
+    // Thin‑film interference (RGB phase)
     vec3 thinFilm(float ndv, float d_nm, float n2){
       float n1=1.0, n3=1.50;
       float sin2 = max(0.0, 1.0 - ndv*ndv);
@@ -205,7 +196,7 @@ const sdfMat = new THREE.ShaderMaterial({
                         R12+R23+A*cos(phiB)), 0.0, 1.0);
     }
 
-    // Build a ray from frustum corners (world-space) — robust for raymarching
+    // Ray from frustum corners (world-space)
     void makeRay(out vec3 ro, out vec3 rd){
       vec3 dx0 = mix(uCornerBL, uCornerBR, vUv.x);
       vec3 dx1 = mix(uCornerTL, uCornerTR, vUv.x);
@@ -215,25 +206,22 @@ const sdfMat = new THREE.ShaderMaterial({
 
     void main(){
       vec3 ro, rd; makeRay(ro, rd);
-
-      // tiny global rocking to match reference vibe
       float t = uTime;
-      rd = rotY(rd, 0.12*sin(t*0.17));
+      rd = rotY(rd, 0.12*sin(t*0.17)); // subtle camera sway
 
-      vec2 hit = raymarch(ro, rd);
-      if(hit.y < 0.0){ gl_FragColor = vec4(0.0); return; }
+      vec2 hi = raymarch(ro, rd);
+      if(hi.y < 0.0){ gl_FragColor = vec4(0.0); return; }
 
-      vec3 pos = ro + rd*hit.x;
+      vec3 pos = ro + rd*hi.x;
       vec3 N   = calcNormal(pos);
       vec3 V   = normalize(ro - pos);
       float ndv = clamp(dot(N,V), 0.0, 1.0);
 
-      // facet texture
+      // Facet texture
       float F = triStripeField(pos*0.8 + N*0.25, N, uStripeFreq, uStripeWarp, t);
       float d_nm = uFilmBase + uFilmAmp * (F - 0.5) * 2.0;
       vec3 filmRGB = thinFilm(ndv, d_nm, 1.35);
 
-      // pastelized emissive, warm rim, and a tiny diffuse tint
       filmRGB = mix(filmRGB, vec3(1.0), clamp(uPastel, 0.0, 1.0)) * uVibrance;
       float rim = pow(1.0 - ndv, 3.0);
       vec3 warm = vec3(1.0, 0.56, 0.35) * uEdgeWarm * rim;
@@ -248,7 +236,7 @@ const sdfMat = new THREE.ShaderMaterial({
 });
 const quad = new THREE.Mesh(fsGeo, sdfMat); fsScene.add(quad);
 
-/* ─────────────────────── Post: Feedback + RGBA Delay ─────────────────────── */
+/* ───────────── Post: Feedback + RGBA Delay ───────────── */
 let W = 2, H = 2;
 const makeRT = () => new THREE.WebGLRenderTarget(W, H, {
   minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter,
@@ -327,7 +315,7 @@ const blurMat = new THREE.ShaderMaterial({
   uniforms: { tInput:{value:null}, uTexel:{value:new THREE.Vector2(1,1)}, uDir:{value:new THREE.Vector2(1,0)}, uRadius:{value:P.blurRadius} }
 });
 
-// History ring (RGBA delay) — use TYPED ARRAYS for weights so uniforms always update
+// History ring (RGBA delay) — use TYPED ARRAYS for weights; mutate in-place
 const HISTORY = 8;
 const history = new Array(HISTORY).fill(0).map(()=>makeRT()); let histIndex = 0;
 const copyMat = new THREE.ShaderMaterial({
@@ -336,9 +324,9 @@ const copyMat = new THREE.ShaderMaterial({
   uniforms: { tInput:{value:null} }
 });
 
-// IMPORTANT: use Float32Array for uniform arrays
 const wR = new Float32Array(8), wG = new Float32Array(8), wB = new Float32Array(8);
-wR[0]=wG[0]=wB[0]=1; // ensure non-black first frame
+wR[0]=wG[0]=wB[0]=1; // ensure visible output on first frame
+
 const finalMat = new THREE.ShaderMaterial({
   vertexShader: fsVS,
   fragmentShader: /* glsl */`
@@ -351,12 +339,17 @@ const finalMat = new THREE.ShaderMaterial({
       vec2 ur=vUv+vec2( uDispersion,-uDispersion)*uTexel;
       vec2 ug=vUv;
       vec2 ub=vUv+vec2(-uDispersion, uDispersion)*uTexel;
+
       float r=texture2D(t0,ur).r*wR[0]+texture2D(t1,ur).r*wR[1]+texture2D(t2,ur).r*wR[2]+texture2D(t3,ur).r*wR[3]+
               texture2D(t4,ur).r*wR[4]+texture2D(t5,ur).r*wR[5]+texture2D(t6,ur).r*wR[6]+texture2D(t7,ur).r*wR[7];
+
       float g=texture2D(t0,ug).g*wG[0]+texture2D(t1,ug).g*wG[1]+texture2D(t2,ug).g*wG[2]+texture2D(t3,ug).g*wG[3]+
               texture2D(t4,ug).g*wG[4]+texture2D(t5,ug).g*wG[5]+texture2D(t6,ug).g*wG[6]+texture2D(t7,ug).g*wG[7];
-      float b=texture2D(t0,ub).b*wB[0]+texture2D(t1,ub).b*wB[1]+texture2D(t2,ub).b?wB[2]+texture2D(t3,ub).b*wB[3]+
+
+      // FIXED: the blue line must use '*' (not '?'), otherwise the program outputs black.
+      float b=texture2D(t0,ub).b*wB[0]+texture2D(t1,ub).b*wB[1]+texture2D(t2,ub).b*wB[2]+texture2D(t3,ub).b*wB[3]+
               texture2D(t4,ub).b*wB[4]+texture2D(t5,ub).b*wB[5]+texture2D(t6,ub).b*wB[6]+texture2D(t7,ub).b*wB[7];
+
       gl_FragColor=vec4(r,g,b,1.0);
     }
   `,
@@ -368,7 +361,6 @@ const finalMat = new THREE.ShaderMaterial({
   }
 });
 
-// helper to mutate typed-array weights (don’t replace the array!)
 function setDelays(r,g,b){
   wR.fill(0); wG.fill(0); wB.fill(0);
   wR[Math.max(0,Math.min(7,r))] = 1.0;
@@ -376,7 +368,7 @@ function setDelays(r,g,b){
   wB[Math.max(0,Math.min(7,b))] = 1.0;
 }
 
-/* ─────────────────── Resize + frustum corners (rays) ─────────────────── */
+/* ───────────── Resize + frustum corners ───────────── */
 function panelWidth(){ const el=document.querySelector('.lil-gui.root'); return el?Math.ceil(el.getBoundingClientRect().width):300; }
 function updateFrustumCorners(){
   const invProj = new THREE.Matrix4().copy(viewCam.projectionMatrix).invert();
@@ -412,7 +404,7 @@ function onResize(){
 }
 window.addEventListener('resize', onResize); onResize();
 
-/* ───────────────────────── 16 stances → seamless loop ───────────────────────── */
+/* ───────────── 16 stances → seamless loop ───────────── */
 const POSES = [
   {tw:2.1, p1:1.30, i1:1.30, p2:0.95, i2:1.05, sf:20.0, sw:0.55, base:420, amp:360, d:[1,3,5]},
   {tw:2.5, p1:1.15, i1:1.45, p2:1.05, i2:0.90, sf:18.0, sw:0.51, base:415, amp:350, d:[0,2,4]},
@@ -441,7 +433,7 @@ function applyPose(p){
   setDelays(p.d[0], p.d[1], p.d[2]);
 }
 
-/* ─────────────────────────── Main loop ─────────────────────────── */
+/* ───────────── Main loop ───────────── */
 let simTime = 0; const clock = new THREE.Clock();
 let bootFilled = false;
 
@@ -492,7 +484,7 @@ function step(dt){
   postQuad.material = compositeMat;
   renderer.setRenderTarget(rtB); renderer.render(postScene, postCam);
 
-  // 5) Blur
+  // 5) Blur (optional)
   if(P.blurRadius>0.001){
     blurMat.uniforms.uRadius.value=P.blurRadius; blurMat.uniforms.tInput.value=rtB.texture; blurMat.uniforms.uDir.value.set(1,0);
     postQuad.material=blurMat; renderer.setRenderTarget(rtTemp); renderer.render(postScene, postCam);
@@ -500,7 +492,7 @@ function step(dt){
     postQuad.material=blurMat; renderer.setRenderTarget(rtB); renderer.render(postScene, postCam);
   }
 
-  // 6) Boot: prefill history so rgbaDelay has data (prevents startup black)
+  // 6) Boot: prefill history so rgbaDelay has valid taps
   if(!bootFilled){
     copyMat.uniforms.tInput.value = rtB.texture; postQuad.material = copyMat;
     for(let k=0;k<HISTORY;k++){ renderer.setRenderTarget(history[k]); renderer.render(postScene, postCam); }
@@ -512,10 +504,11 @@ function step(dt){
   renderer.setRenderTarget(history[histIndex]); renderer.render(postScene, postCam);
   renderer.setRenderTarget(null); histIndex = (histIndex+1)%HISTORY;
 
+  // 8) latest→oldest → t0..t7
   for(let k=0;k<HISTORY;k++){ const slot=(histIndex-1-k+HISTORY)%HISTORY; finalMat.uniforms['t'+k].value = history[slot].texture; }
   finalMat.uniforms.uDispersion.value = P.dispersion;
 
-  // 8) Final to screen
+  // 9) Final to screen
   postQuad.material = finalMat;
   renderer.setRenderTarget(null); renderer.render(postScene, postCam);
 
@@ -527,7 +520,7 @@ function step(dt){
 function animate(){ const dt=clock.getDelta(); step(dt); requestAnimationFrame(animate); }
 requestAnimationFrame(animate);
 
-/* ───────────────────────── Contact sheet (C) ───────────────────────── */
+/* ───────────── Contact sheet (C) ───────────── */
 window.addEventListener('keydown', async (e)=>{
   if(e.key.toLowerCase()!=='c') return;
   const rows=4, cols=4, pad=8, cw=P.sheetSize, ch=P.sheetSize;
@@ -549,7 +542,7 @@ window.addEventListener('keydown', async (e)=>{
   const a=document.createElement('a'); a.download='contact_sheet.png'; a.href=off.toDataURL('image/png'); a.click();
 });
 
-/* ───────────────────────── Initial layout ───────────────────────── */
+/* ───────────── Initial layout ───────────── */
 function panelW(){ const el=document.querySelector('.lil-gui.root'); return el?Math.ceil(el.getBoundingClientRect().width):300; }
 function size(){ const w=Math.max(1, window.innerWidth-panelW()); const h=Math.max(1, window.innerHeight);
   renderer.setSize(w,h,false); viewCam.aspect=w/h; viewCam.updateProjectionMatrix();
