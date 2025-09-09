@@ -3,9 +3,9 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Iridescent Folding Cube — Feedback + RGBA Delay</title>
+  <title>Origata — Folding Iridescent Cube (Feedback + RGBA Delay)</title>
 
-  <!-- One Three.js instance; addons resolve to this version -->
+  <!-- Single Three.js import; addons resolve to this version -->
   <script type="importmap">
   {
     "imports": {
@@ -30,6 +30,7 @@
       position: fixed !important; right: 0 !important; top: 0 !important; bottom: 0 !important;
       width: 300px !important; max-height: 100vh !important; overflow-y: auto !important;
       background: rgba(12,12,12,0.92) !important; border-left: 1px solid rgba(255,255,255,0.08) !important; z-index: 5;
+      backdrop-filter: blur(6px);
     }
     .hint { position: fixed; left: 12px; bottom: 10px; color: #8a8a8a; font-size: 12px; pointer-events: none; user-select: none; }
   </style>
