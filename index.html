@@ -5,9 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Iridescent Folding Crystal</title>
   <style>
-    :root {
-      --bg: #000;
-    }
+    :root { --bg: #000; }
     html, body {
       margin: 0;
       padding: 0;
@@ -28,7 +26,7 @@
       display: block;
       background: var(--bg);
     }
-    /* Pin lil-gui to the right; keep it slim and unobtrusive */
+    /* Minimal, fixed panel on the right */
     .lil-gui.root {
       position: fixed !important;
       right: 0 !important;
@@ -56,8 +54,6 @@
     <canvas id="scene"></canvas>
   </div>
   <div class="hint">Drag to orbit • Scroll to zoom</div>
-
-  <!-- Main module -->
   <script type="module" src="./main.js"></script>
 </body>
 </html>
