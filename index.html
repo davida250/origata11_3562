@@ -1,78 +1,69 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="utf-8" />
-  <title>Folding Iridescent Crystal — three.js</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <style>
-    html, body {
-      margin: 0;
-      height: 100%;
-      overflow: hidden;
-      background: #000;
-      color: #e6e6e6;
-      font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
-    }
-    .layout {
-      position: fixed; inset: 0;
-      display: grid;
-      grid-template-columns: 1fr 300px; /* right side panel */
-    }
-    #sceneHost { position: relative; background: #000; }
-    #ui {
-      border-left: 1px solid #222;
-      background: #0b0b0b;
-      padding: 10px 8px 14px 8px;
-      overflow: auto;
-    }
-    h3 { margin: 8px 8px 6px 8px; font-weight: 600; }
-    .hint { font-size: 12px; line-height: 1.35; color: #a9a9a9; margin-top: 8px; }
-    .brand { font-size: 12px; color: #7a7a7a; margin: 10px 0 0 2px; }
-    canvas { display: block; }
-
-    /* lil-gui dark theme that blends with the panel */
-    .lil-gui {
-      --background-color: #0f0f10;
-      --text-color:#e6e6e6;
-      --title-background-color:#121215;
-      --widget-color:#1b1b1d;
-      --hover-color:#242428;
-      --focus-color:#2c2c31;
-      --number-color:#fff;
-    }
-  </style>
-
-  <!-- Import maps for bare-module imports used by main.js -->
-  <script type="importmap">
-    {
-      "imports": {
-        "three": "https://unpkg.com/three@0.165.0/build/three.module.js",
-        "three/addons/": "https://unpkg.com/three@0.165.0/examples/jsm/",
-        "lil-gui": "https://unpkg.com/lil-gui@0.19/dist/lil-gui.esm.min.js"
-      }
-    }
-  </script>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Folding Holographic Shape</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #000000;
+            color: #ffffff;
+            font-family: 'Courier New', Courier, monospace;
+        }
+        canvas {
+            display: block;
+        }
+        #controls {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            padding: 15px;
+            background-color: rgba(30, 30, 30, 0.7);
+            border-radius: 5px;
+            width: 250px;
+        }
+        .control-group {
+            margin-bottom: 15px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-size: 14px;
+        }
+        input[type="range"] {
+            width: 100%;
+        }
+    </style>
 </head>
 <body>
-  <div class="layout">
-    <div id="sceneHost"></div>
-    <aside id="ui">
-      <h3>Folding Crystal</h3>
-      <div id="gui"></div>
-      <div class="hint">
-        <p><strong>Tips</strong></p>
-        <ul style="padding-left:18px; margin:6px 0;">
-          <li><em>Speed</em> = fold tempo, <em>Amplitude</em> = hinge angle.</li>
-          <li><em>Trails</em> controls afterimage time delay (0 off → 0.95 long).</li>
-          <li><em>Stripe Density/Warp/Sharpness</em> shape interference‑like bands.</li>
-          <li><em>Iridescence</em> &amp; <em>Film nm</em> tune the thin‑film color shift.</li>
-        </ul>
-      </div>
-      <div class="brand">three.js + custom GLSL · ACES tone mapping</div>
-    </aside>
-  </div>
+    <canvas id="webgl"></canvas>
 
-  <!-- Main module (modules are deferred; do NOT add async) -->
-  <script type="module" src="./main.js"></script>
+    <div id="controls">
+        <div class="control-group">
+            <label for="speed">Animation Speed</label>
+            <input type="range" id="speed" min="0" max="1" value="0.2" step="0.01">
+        </div>
+        <div class="control-group">
+            <label for="distortion">Distortion Amount</label>
+            <input type="range" id="distortion" min="0" max="1" value="0.5" step="0.01">
+        </div>
+         <div class="control-group">
+            <label for="fresnel">Highlight Power</label>
+            <input type="range" id="fresnel" min="0.1" max="5.0" value="1.8" step="0.1">
+        </div>
+    </div>
+
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+
+    <script type="module" src="main.js"></script>
 </body>
 </html>
