@@ -1,69 +1,37 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta
-      name="viewport"
-      content="width=device-width, initial-scale=1, viewport-fit=cover"
-    />
-    <title>Folding Contact Sheet — three.js</title>
+<head>
+  <meta charset="utf-8" />
+  <title>Folding Iridescent Shape — Three.js (SDF Ray March)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1" />
+  <style>
+    html, body {
+      margin: 0; height: 100%; overflow: hidden; background: #000;
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+    }
+    #app { position: fixed; inset: 0; }
+    /* Put the GUI on the right */
+    .lil-gui.root {
+      position: fixed !important;
+      right: 12px; top: 12px;
+      max-height: calc(100% - 24px);
+      overflow: auto;
+      border-radius: 8px;
+      backdrop-filter: blur(6px);
+    }
+    .credits {
+      position: fixed; left: 12px; bottom: 10px; color: #a0a0a0; font-size: 12px;
+      mix-blend-mode: lighten; user-select: none; pointer-events: none;
+    }
+  </style>
+</head>
+<body>
+  <div id="app"></div>
+  <div class="credits">
+    SDF folding + thin-film shader. Drag to orbit. Scroll to zoom.
+  </div>
 
-    <!-- Import maps (maps the bare specifier "three" to a CDN).
-         The shim enables older browsers; modern ones just ignore it. -->
-    <script async src="https://ga.jspm.io/npm:es-module-shims@1.10.0/dist/es-module-shims.js"></script>
-    <script type="importmap">
-      {
-        "imports": {
-          "three": "https://cdn.jsdelivr.net/npm/three@0.165.0/build/three.module.js",
-          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.165.0/examples/jsm/"
-        }
-      }
-    </script>
-
-    <style>
-      html, body {
-        height: 100%;
-        margin: 0;
-        background: #000;
-        color: #ddd;
-        font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
-        overflow: hidden;
-      }
-      #app {
-        position: fixed;
-        inset: 0;
-      }
-      .lil-gui.root {
-        position: fixed !important;
-        right: 0;
-        top: 0;
-        max-height: 100vh;
-        overflow: auto;
-        z-index: 10;
-      }
-      .info {
-        position: fixed;
-        left: 12px;
-        bottom: 12px;
-        color: #aaa;
-        font-size: 12px;
-        line-height: 1.4;
-        z-index: 5;
-        pointer-events: none;
-        text-shadow: 0 1px 2px rgba(0,0,0,.6);
-      }
-      a { color: #8ad; text-decoration: none; }
-      a:hover { text-decoration: underline; }
-    </style>
-  </head>
-  <body>
-    <div id="app"></div>
-    <div class="info">
-      Drag = orbit · Wheel = zoom · Shift+Drag = pan<br/>
-      16 panels show one shape at different time offsets.
-    </div>
-
-    <!-- Main module -->
-    <script type="module" src="./main.js"></script>
-  </body>
+  <!-- Three.js & dependencies -->
+  <script type="module" src="main.js"></script>
+</body>
 </html>
