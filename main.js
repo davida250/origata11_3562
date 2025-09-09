@@ -37,15 +37,12 @@ class CrystalGrid {
         this.gui = new GUI({ container: guiContainer });
 
         this.settings = {
-            // Shape Controls
             animationSpeed: 0.15,
             deformation: 0.5,
-            // Texture & Color Controls
             lineFrequency: 8.0,
             lineFlicker: 0.7,
             fresnelPower: 2.5,
             colorCycleSpeed: 0.2,
-            // Glow Controls
             glowStrength: 0.4,
             glowRadius: 0.6,
         };
@@ -82,21 +79,13 @@ class CrystalGrid {
                 u_colorCycleSpeed: { value: this.settings.colorCycleSpeed },
             },
             vertexShader: `
-                // 'varying' variables are used to pass data from the vertex shader
-                // to the fragment shader.
                 varying vec3 v_normal;
                 varying vec3 v_viewDirection;
                 
                 void main() {
-                    // Calculate the position of the vertex in relation to the camera
                     vec4 modelViewPosition = modelViewMatrix * vec4(position, 1.0);
-                    
-                    // The view direction is the vector from the vertex to the camera (which is at 0,0,0 in view space)
                     v_viewDirection = -modelViewPosition.xyz;
-                    
-                    // Pass the transformed normal to the fragment shader
                     v_normal = normalize(normalMatrix * normal);
-
                     gl_Position = projectionMatrix * modelViewPosition;
                 }
             `,
@@ -107,45 +96,39 @@ class CrystalGrid {
                 uniform float u_fresnelPower;
                 uniform float u_colorCycleSpeed;
 
-                // Receive the variables passed from the vertex shader
                 varying vec3 v_normal;
                 varying vec3 v_viewDirection;
 
-                // Noise function to create procedural texture
                 float noise(vec2 st) {
                     return fract(sin(dot(st.xy, vec2(12.9898,78.233))) * 43758.5453123);
                 }
 
-                // Custom color palette matching the reference image
+                // --- THIS FUNCTION IS REFACTORED TO BE MORE ROBUST ---
+                // It smoothly blends between three colors without using conditional if-statements.
                 vec3 getPalette(float t) {
-                    vec3 pink = vec3(1.0, 0.4, 0.7);
-                    vec3 green = vec3(0.4, 1.0, 0.7);
-                    vec3 blue = vec3(0.4, 0.7, 1.0);
-                    vec3 yellow = vec3(1.0, 0.9, 0.4);
-
-                    if (t < 0.33) return mix(pink, green, t / 0.33);
-                    if (t < 0.66) return mix(green, blue, (t - 0.33) / 0.33);
-                    return mix(blue, pink, (t - 0.66) / 0.34);
+                    vec3 color1 = vec3(1.0, 0.4, 0.7); // Pink
+                    vec3 color2 = vec3(0.4, 1.0, 0.7); // Green
+                    vec3 color3 = vec3(0.4, 0.7, 1.0); // Blue
+                    
+                    vec3 finalColor = mix(color1, color2, smoothstep(0.0, 0.5, t));
+                    finalColor = mix(finalColor, color3, smoothstep(0.5, 1.0, t));
+                    
+                    return finalColor;
                 }
 
                 void main() {
-                    // --- Iridescence (Fresnel Effect) ---
-                    // Here we use the 'v_viewDirection' that was passed from the vertex shader
                     vec3 viewDir = normalize(v_viewDirection);
                     float fresnel = 1.0 - dot(viewDir, v_normal);
                     fresnel = pow(fresnel, u_fresnelPower);
 
-                    // --- Color ---
                     float colorTime = u_time * u_colorCycleSpeed * 0.2;
                     vec3 baseColor = getPalette(fract(fresnel + colorTime));
 
-                    // --- Scan Line Texture ---
                     float lineNoise = noise(gl_FragCoord.xy * 0.1 + u_time);
                     float linePos = gl_FragCoord.y + lineNoise * u_lineFlicker * 20.0;
                     float linePattern = sin(linePos * u_lineFrequency * 0.1);
                     linePattern = smoothstep(0.4, 0.6, linePattern);
                     
-                    // --- Final Composition ---
                     vec3 finalColor = baseColor * (0.5 + 0.5 * linePattern);
                     
                     gl_FragColor = vec4(finalColor, 1.0);
@@ -156,15 +139,12 @@ class CrystalGrid {
 
         for (let i = 0; i < grid_size; i++) {
             for (let j = 0; j < grid_size; j++) {
-                // Use higher detail geometry for smoother deformations
                 const geometry = new THREE.IcosahedronGeometry(1.2, 3);
                 geometry.userData.originalPositions = geometry.attributes.position.clone();
-                
                 const mesh = new THREE.Mesh(geometry, this.sharedMaterial);
                 mesh.position.x = (i - (grid_size - 1) / 2) * spacing;
                 mesh.position.y = (j - (grid_size - 1) / 2) * spacing;
                 mesh.rotation.set(Math.random() * Math.PI, Math.random() * Math.PI, Math.random() * Math.PI);
-                
                 this.scene.add(mesh);
                 this.meshes.push(mesh);
             }
@@ -175,7 +155,6 @@ class CrystalGrid {
         this.composer = new EffectComposer(this.renderer);
         const renderPass = new RenderPass(this.scene, this.camera);
         this.composer.addPass(renderPass);
-
         this.bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 1.5, 0.4, 0.85);
         this.bloomPass.threshold = 0;
         this.bloomPass.strength = this.settings.glowStrength;
@@ -188,33 +167,26 @@ class CrystalGrid {
             const geometry = mesh.geometry;
             const originalPositions = geometry.userData.originalPositions.array;
             const positions = geometry.attributes.position.array;
-
             const time = elapsedTime * this.settings.animationSpeed;
             const deformation = this.settings.deformation;
-
             for (let i = 0; i < positions.length; i += 3) {
                 const ox = originalPositions[i];
                 const oy = originalPositions[i + 1];
                 const oz = originalPositions[i + 2];
-                
-                // Use two layers of noise for more complex, non-uniform shapes
                 const noise1 = this.simplex.noise3d(ox * 0.8 + time + index, oy * 0.8 + time, oz * 0.8 + time);
                 const noise2 = this.simplex.noise3d(ox * 2.5 + time, oy * 2.5 + time, oz * 2.5 + time + index);
-                
                 const totalNoise = noise1 + (noise2 * 0.3);
-
                 positions[i] = ox + totalNoise * deformation;
                 positions[i + 1] = oy + totalNoise * deformation;
                 positions[i + 2] = oz + totalNoise * deformation;
             }
-
             geometry.attributes.position.needsUpdate = true;
             geometry.computeVertexNormals();
         });
     }
 
     addEventListeners() {
-        window.addEventListener('resize', () => {
+        window.addEventListener('resize', ()_ => {
             this.camera.aspect = window.innerWidth / window.innerHeight;
             this.camera.updateProjectionMatrix();
             this.renderer.setSize(window.innerWidth, window.innerHeight);
@@ -222,7 +194,7 @@ class CrystalGrid {
             this.composer.setSize(window.innerWidth, window.innerHeight);
         });
         
-        window.addEventListener('mousemove', (event) => {
+        window.addEventListener('mousemove', (event)_ => {
             this.mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
             this.mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
         });
@@ -230,27 +202,20 @@ class CrystalGrid {
     
     animate() {
         const elapsedTime = this.clock.getElapsedTime();
-
-        // Update shared uniforms from settings
         this.sharedMaterial.uniforms.u_time.value = elapsedTime;
         this.sharedMaterial.uniforms.u_lineFrequency.value = this.settings.lineFrequency;
         this.sharedMaterial.uniforms.u_lineFlicker.value = this.settings.lineFlicker;
         this.sharedMaterial.uniforms.u_fresnelPower.value = this.settings.fresnelPower;
         this.sharedMaterial.uniforms.u_colorCycleSpeed.value = this.settings.colorCycleSpeed;
-
         this.updateMeshes(elapsedTime);
-
-        // Subtle camera parallax
         this.camera.position.x += (this.mouse.x * 2 - this.camera.position.x) * 0.02;
         this.camera.position.y += (this.mouse.y * 2 - this.camera.position.y) * 0.02;
         this.camera.lookAt(this.scene.position);
-
         this.composer.render();
-        requestAnimationFrame(() => this.animate());
+        requestAnimationFrame(()_ => this.animate());
     }
 }
 
-// Wait for the HTML to load, then start the application
-window.addEventListener('DOMContentLoaded', () => {
+window.addEventListener('DOMContentLoaded', ()_ => {
     new CrystalGrid();
 });
