@@ -103,8 +103,6 @@ class CrystalGrid {
                     return fract(sin(dot(st.xy, vec2(12.9898,78.233))) * 43758.5453123);
                 }
 
-                // --- THIS FUNCTION IS REFACTORED TO BE MORE ROBUST ---
-                // It smoothly blends between three colors without using conditional if-statements.
                 vec3 getPalette(float t) {
                     vec3 color1 = vec3(1.0, 0.4, 0.7); // Pink
                     vec3 color2 = vec3(0.4, 1.0, 0.7); // Green
@@ -186,7 +184,7 @@ class CrystalGrid {
     }
 
     addEventListeners() {
-        window.addEventListener('resize', ()_ => {
+        window.addEventListener('resize', () => {
             this.camera.aspect = window.innerWidth / window.innerHeight;
             this.camera.updateProjectionMatrix();
             this.renderer.setSize(window.innerWidth, window.innerHeight);
@@ -194,7 +192,7 @@ class CrystalGrid {
             this.composer.setSize(window.innerWidth, window.innerHeight);
         });
         
-        window.addEventListener('mousemove', (event)_ => {
+        window.addEventListener('mousemove', (event) => {
             this.mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
             this.mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
         });
@@ -212,10 +210,10 @@ class CrystalGrid {
         this.camera.position.y += (this.mouse.y * 2 - this.camera.position.y) * 0.02;
         this.camera.lookAt(this.scene.position);
         this.composer.render();
-        requestAnimationFrame(()_ => this.animate());
+        requestAnimationFrame(() => this.animate());
     }
 }
 
-window.addEventListener('DOMContentLoaded', ()_ => {
+window.addEventListener('DOMContentLoaded', () => {
     new CrystalGrid();
 });
