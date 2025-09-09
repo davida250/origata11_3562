@@ -1,46 +1,14 @@
-// Iridescent folding crystal — continuous folds (no separation),
-// vibrant thin‑film stripes + real reflections/refraction (MeshPhysicalMaterial).
+// Twisting cube with feedback + blur + RGBA delay (TouchDesigner-style).
+// - Single continuous mesh (no separating polygons).
+// - Feedback accumulation creates the vibrant “folding” texture.
+// - RGBA delay picks different history frames per channel (a la rgbaDelay).
+// Open index.html in a modern browser.
 
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { ConvexGeometry } from 'three/addons/geometries/ConvexGeometry.js';
-import { mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js'; // <-- correct import
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import GUI from 'https://cdn.jsdelivr.net/npm/lil-gui@0.19/+esm';
 
-/* ===== Controls (minimal, right-side) ===== */
-const P = {
-  // Motion / shape
-  speed: 1.0,
-  fold: 1.10,
-  noiseAmp: 0.26,
-  noiseScale: 1.7,
-  autoRotate: true,
-
-  // Thin‑film overlay (vibrant texture)
-  texFreq: 14.0,
-  texWarp: 0.55,
-  baseNm: 430.0,   // base thickness (nm)
-  ampNm: 380.0,    // variation (nm)
-  vibrance: 1.6,   // emissive boost
-  pastel: 0.22,    // lift toward white (0..1)
-
-  // Physical material (reflections/refraction/iridescence)
-  envIntensity: 1.6,
-  transmission: 0.82,
-  thickness: 0.8,
-  ior: 1.36,
-  roughness: 0.06,
-  clearcoat: 1.0,
-  clearcoatRoughness: 0.12,
-  iridescence: 1.0,
-  iriMinNm: 250.0,
-  iriMaxNm: 900.0,
-
-  reseed: () => reseed(true),
-};
-
-/* ===== Renderer / Scene ===== */
 const canvas = /** @type {HTMLCanvasElement} */ (document.getElementById('scene'));
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false, powerPreference: 'high-performance' });
 renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
@@ -53,376 +21,475 @@ renderer.physicallyCorrectLights = true;
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x000000);
 
-// Clean, neutral environment for reflections/refraction (no external HDR)
+const camera = new THREE.PerspectiveCamera(32, 1, 0.1, 100);
+camera.position.set(0, 0, 4.6);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true; controls.dampingFactor = 0.08; controls.rotateSpeed = 0.6;
+
+// Neutral, clean environment (for reflections/refraction)
 const pmrem = new THREE.PMREMGenerator(renderer);
 const envRT = pmrem.fromScene(new RoomEnvironment(renderer), 0.04);
 scene.environment = envRT.texture;
 
-/* ===== Camera / Controls ===== */
-const camera = new THREE.PerspectiveCamera(32, 1, 0.1, 100);
-camera.position.set(0, 0, 4.8);
-const controls = new OrbitControls(camera, renderer.domElement);
-controls.enableDamping = true; controls.dampingFactor = 0.08; controls.rotateSpeed = 0.6;
+/* =======================
+   Parameters / GUI
+   ======================= */
+const P = {
+  // Cube deformation & motion
+  twist: 3.0,       // radians per unit height
+  spin: 0.35,       // auto spin
+  autoRotate: true,
 
-/* ===== Utilities ===== */
-function mulberry32(a) {
-  return function () {
-    let t = (a += 0x6D2B79F5);
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
+  // Feedback pipeline
+  feedbackDecay: 0.92,  // < 1.0 keeps trails
+  feedbackGain: 0.95,   // strength of previous frame
+  currentGain: 1.0,     // strength of current frame
+  warpRotate: 0.01,     // rotation of feedback each frame
+  warpZoom: 0.002,      // zoom of feedback each frame
+  warpJitter: 0.0025,   // procedural jitter on feedback UVs
+  blur: 1.6,            // blur radius (separable)
+  dispersion: 0.0018,   // chromatic UV shift on final composite
 
-/* ===== Geometry: convex "crystal" with shared vertices =====
-   - ConvexGeometry starts non-indexed; we merge vertices to index it.
-   - We bake a continuous smooth normal attribute `aSmooth` for displacement. */
-function makeConvexShard(seed, scale = 1.0) {
-  const rng = mulberry32(Math.floor(seed * 1e6));
-  const pts = [];
-  const NUM = 16 + Math.floor(rng() * 8); // 16..23 pts
-  for (let i = 0; i < NUM; i++) {
-    const r = 0.8 + rng() * 0.65;
-    const p = new THREE.Vector3((rng()*2-1)*r, (rng()*2-1)*r, (rng()*2-1)*r);
-    // Snap some axes to suggest planar facets
-    if (rng() < 0.32) p.x = Math.round(p.x * 2.0) * 0.42;
-    if (rng() < 0.32) p.y = Math.round(p.y * 2.0) * 0.42;
-    if (rng() < 0.32) p.z = Math.round(p.z * 2.0) * 0.42;
-    pts.push(p);
-  }
+  // RGBA delay (frames)
+  delayR: 0,
+  delayG: 2,
+  delayB: 4,
 
-  // Start as non-indexed convex, then merge to create shared vertices.
-  let geom = new ConvexGeometry(pts);
-  geom = mergeVertices(geom, 1e-4); // <-- continuous hull (no separation)
-  geom.computeVertexNormals();       // smooth normals for continuous displacement
-  geom.center();
-  geom.scale(scale, scale, scale);
-  geom.computeBoundingSphere();
+  // Material (reflections / refraction)
+  roughness: 0.06,
+  transmission: 0.74,
+  thickness: 0.75,
+  ior: 1.36,
+  clearcoat: 1.0,
+  clearcoatRoughness: 0.12,
+  iridescence: 1.0,
+  envIntensity: 1.5,
 
-  // Bake a copy of smooth normals for displacement, even if we shade flat.
-  const smooth = geom.getAttribute('normal').array.slice();
-  geom.setAttribute('aSmooth', new THREE.BufferAttribute(new Float32Array(smooth), 3));
-  return geom;
-}
+  speed: 1.0,       // global speed scalar
+  reseed: () => (seed = Math.random() * 1000.0)
+};
 
-/* ===== Material: MeshPhysical + shader patch (safe) =====
-   - Displacement happens along `aSmooth` (continuous).
-   - Emissive adds thin-film stripes (view dependent).
-   - We keep Three's PBR stack for reflections/refraction/iridescence. */
-let seed = 0.1375;
+const gui = new GUI({ title: 'Controls', width: 300 });
+const fShape = gui.addFolder('Shape');
+fShape.add(P, 'twist', 0.0, 8.0, 0.01).name('Twist');
+fShape.add(P, 'spin', 0.0, 2.0, 0.01).name('Spin');
+fShape.add(P, 'autoRotate').name('Auto Rotate');
 
+const fFb = gui.addFolder('Feedback');
+fFb.add(P, 'feedbackDecay', 0.80, 0.995, 0.001).name('Decay');
+fFb.add(P, 'feedbackGain', 0.0, 1.5, 0.01).name('Feedback Gain');
+fFb.add(P, 'currentGain', 0.0, 2.0, 0.01).name('Current Gain');
+fFb.add(P, 'warpRotate', -0.05, 0.05, 0.0005).name('Warp Rotate');
+fFb.add(P, 'warpZoom', -0.02, 0.02, 0.0001).name('Warp Zoom');
+fFb.add(P, 'warpJitter', 0.0, 0.01, 0.0001).name('Warp Jitter');
+fFb.add(P, 'blur', 0.0, 4.0, 0.01).name('Blur');
+
+const fDelay = gui.addFolder('RGBA Delay');
+fDelay.add(P, 'delayR', 0, 7, 1).name('Delay R');
+fDelay.add(P, 'delayG', 0, 7, 1).name('Delay G');
+fDelay.add(P, 'delayB', 0, 7, 1).name('Delay B');
+fDelay.add(P, 'dispersion', 0.0, 0.01, 0.0001).name('Dispersion');
+
+const fMat = gui.addFolder('Material');
+fMat.add(P, 'roughness', 0.0, 1.0, 0.001).name('Roughness').onChange(()=> material.roughness = P.roughness);
+fMat.add(P, 'transmission', 0.0, 1.0, 0.001).name('Transmission').onChange(()=> material.transmission = P.transmission);
+fMat.add(P, 'thickness', 0.0, 2.0, 0.01).name('Thickness').onChange(()=> material.thickness = P.thickness);
+fMat.add(P, 'ior', 1.0, 2.0, 0.001).name('IOR').onChange(()=> material.ior = P.ior);
+fMat.add(P, 'clearcoat', 0.0, 1.0, 0.001).name('Clearcoat').onChange(()=> material.clearcoat = P.clearcoat);
+fMat.add(P, 'clearcoatRoughness', 0.0, 1.0, 0.001).name('Clearcoat Rough.').onChange(()=> material.clearcoatRoughness = P.clearcoatRoughness);
+fMat.add(P, 'iridescence', 0.0, 1.0, 0.001).name('PBR Iridescence').onChange(()=> material.iridescence = P.iridescence);
+fMat.add(P, 'envIntensity', 0.0, 3.0, 0.01).name('Env Intensity').onChange(()=> material.envMapIntensity = P.envIntensity);
+
+gui.add(P, 'speed', 0.0, 3.0, 0.01).name('Speed');
+gui.add(P, 'reseed').name('Reseed');
+
+let seed = 123.456;
+
+/* =======================
+   Twisting cube (continuous)
+   ======================= */
+const geo = new THREE.BoxGeometry(2.2, 2.2, 2.2, 80, 120, 80); // many segments for smooth twist
 const material = new THREE.MeshPhysicalMaterial({
   color: 0xffffff,
   metalness: 0.0,
   roughness: P.roughness,
-  clearcoat: P.clearcoat,
-  clearcoatRoughness: P.clearcoatRoughness,
   transmission: P.transmission,
   thickness: P.thickness,
   ior: P.ior,
+  clearcoat: P.clearcoat,
+  clearcoatRoughness: P.clearcoatRoughness,
   iridescence: P.iridescence,
-  iridescenceIOR: 1.30,
-  iridescenceThicknessRange: [P.iriMinNm, P.iriMaxNm],
   envMapIntensity: P.envIntensity,
   side: THREE.DoubleSide,
-  flatShading: true // faceted look while geometry remains continuous
+  flatShading: true // faceted shading while positions remain continuous
 });
+const cube = new THREE.Mesh(geo, material);
+scene.add(cube);
 
-// Inject folding + thin‑film in a robust way
-material.onBeforeCompile = (shader) => {
-  // GPU uniforms
-  Object.assign(shader.uniforms, {
-    uTime:       { value: 0.0 },
-    uSeed:       { value: seed },
-    uFold:       { value: P.fold },
-    uNoiseAmp:   { value: P.noiseAmp },
-    uNoiseScale: { value: P.noiseScale },
-    uFoldN1:     { value: new THREE.Vector3(1,0,0) },
-    uFoldN2:     { value: new THREE.Vector3(0,1,0) },
-    uTexFreq:    { value: P.texFreq },
-    uTexWarp:    { value: P.texWarp },
-    uBaseNm:     { value: P.baseNm },
-    uAmpNm:      { value: P.ampNm },
-    uVibrance:   { value: P.vibrance },
-    uPastel:     { value: P.pastel },
-  });
+// Inject a simple, continuous TWIST deformation in the vertex stage (no cracks)
+material.onBeforeCompile = (sh) => {
+  sh.uniforms.uTwist = { value: P.twist };
+  sh.uniforms.uTime  = { value: 0.0 };
 
-  // Varyings/attributes/uniforms in vertex
-  shader.vertexShader =
-  `
-    attribute vec3 aSmooth;
-    varying vec3 vWorldPos;
-    varying vec3 vNormalW;
-
+  sh.vertexShader = `
+    uniform float uTwist;
     uniform float uTime;
-    uniform float uSeed;
-    uniform float uFold;
-    uniform float uNoiseAmp;
-    uniform float uNoiseScale;
-    uniform vec3  uFoldN1;
-    uniform vec3  uFoldN2;
-  ` + shader.vertexShader;
+  ` + sh.vertexShader;
 
-  // Helpers + main() hook
-  shader.vertexShader = shader.vertexShader.replace(
-    'void main() {',
-    `
-    // Simplex noise (iq)
-    vec3 mod289(vec3 x){ return x - floor(x * (1.0/289.0)) * 289.0; }
-    vec4 mod289(vec4 x){ return x - floor(x * (1.0/289.0)) * 289.0; }
-    vec4 permute(vec4 x){ return mod289(((x*34.0)+1.0)*x); }
-    vec4 taylorInvSqrt(vec4 r){ return 1.79284291400159 - 0.85373472095314 * r; }
-    float snoise(vec3 v){
-      const vec2 C = vec2(1.0/6.0, 1.0/3.0);
-      const vec4 D = vec4(0.0, 0.5, 1.0, 2.0);
-      vec3 i  = floor(v + dot(v, C.yyy));
-      vec3 x0 = v - i + dot(i, C.xxx);
-      vec3 g = step(x0.yzx, x0.xyz);
-      vec3 l = 1.0 - g;
-      vec3 i1 = min(g.xyz, l.zxy);
-      vec3 i2 = max(g.xyz, l.zxy);
-      vec3 x1 = x0 - i1 + C.xxx;
-      vec3 x2 = x0 - i2 + C.yyy;
-      vec3 x3 = x0 - D.yyy;
-      i = mod289(i);
-      vec4 p = permute( permute( permute(
-                i.z + vec4(0.0, i1.z, i2.z, 1.0))
-              + i.y + vec4(0.0, i1.y, i2.y, 1.0))
-              + i.x + vec4(0.0, i1.x, i2.x, 1.0));
-      float n_ = 0.142857142857;
-      vec3  ns = n_ * D.wyz - D.xzx;
-      vec4 j = p - 49.0 * floor(p * ns.z * ns.z);
-      vec4 x_ = floor(j * ns.z);
-      vec4 y_ = floor(j - 7.0 * x_);
-      vec4 x = x_ *ns.x + ns.yyyy;
-      vec4 y = y_ *ns.x + ns.yyyy;
-      vec4 h = 1.0 - abs(x) - abs(y);
-      vec4 b0 = vec4(x.xy, y.xy);
-      vec4 b1 = vec4(x.zw, y.zw);
-      vec4 s0 = floor(b0)*2.0 + 1.0;
-      vec4 s1 = floor(b1)*2.0 + 1.0;
-      vec4 sh = -step(h, vec4(0.0));
-      vec4 a0 = b0.xzyw + s0.xzyw*sh.xxyy;
-      vec4 a1 = b1.xzyw + s1.xzyw*sh.zzww;
-      vec3 p0 = vec3(a0.xy,h.x);
-      vec3 p1 = vec3(a0.zw,h.y);
-      vec3 p2 = vec3(a1.xy,h.z);
-      vec3 p3 = vec3(a1.zw,h.w);
-      vec4 norm = taylorInvSqrt(vec4(dot(p0,p0), dot(p1,p1), dot(p2,p2), dot(p3,p3)));
-      p0 *= norm.x; p1 *= norm.y; p2 *= norm.z; p3 *= norm.w;
-      vec4 m = max(0.6 - vec4(dot(x0,x0), dot(x1,x1), dot(x2,x2), dot(x3,x3)), 0.0);
-      m = m * m;
-      return 42.0 * dot(m*m, vec4(dot(p0,x0), dot(p1,x1), dot(p2,x2), dot(p3,x3)));
-    }
-
-    // Triangular-wave folding mapping along plane normal n
-    vec3 foldSpace(vec3 p, vec3 n, float period, float intensity) {
-      float d = dot(p, n);
-      float tri = abs(mod(d + period, 2.0*period) - period) - 0.5*period;
-      float delta = (tri - d) * intensity;
-      return p + n * delta;
-    }
-
-    void main() {
-    `
-  );
-
-  // Apply folding & continuous displacement; write varyings
-  shader.vertexShader = shader.vertexShader.replace(
+  sh.vertexShader = sh.vertexShader.replace(
     '#include <begin_vertex>',
     `
       #include <begin_vertex>
       {
+        // continuous twist about Y; angle scales with height
+        float angle = uTwist * transformed.y;
+        float s = sin(angle), c = cos(angle);
         vec3 p = transformed;
-        float t = uTime * 0.5 + uSeed * 17.0;
-
-        // Animated fold axes
-        vec3 dyn1 = normalize(vec3(sin(t*0.7), cos(t*0.9), sin(t*0.5)));
-        vec3 dyn2 = normalize(vec3(cos(t*0.6), sin(t*0.8), cos(t*0.4)));
-        vec3 n1 = normalize(uFoldN1 * 0.65 + dyn1 * 0.35);
-        vec3 n2 = normalize(uFoldN2 * 0.65 + dyn2 * 0.35);
-
-        float foldI = uFold * (0.7 + 0.3 * sin(uTime*0.6 + uSeed));
-        p = foldSpace(p, n1, 1.35, foldI);
-        p = foldSpace(p, n2, 1.05, foldI * 0.66);
-
-        // Continuous displacement along baked smooth normal (no cracks)
-        vec3 smoothN = normalize(aSmooth);
-        float ns = snoise(p * uNoiseScale + vec3(0.0, t*0.6, t*0.3) + uSeed);
-        p += smoothN * (uNoiseAmp * ns);
-
+        p.x = c * transformed.x - s * transformed.z;
+        p.z = s * transformed.x + c * transformed.z;
         transformed = p;
-
-        // World-space varyings
-        vWorldPos = (modelMatrix * vec4(transformed, 1.0)).xyz;
-        vNormalW  = normalize(mat3(modelMatrix) * smoothN);
       }
     `
   );
 
-  // Fragment prelude: uniforms + varyings + helpers (no macro defines)
-  shader.fragmentShader =
-  `
-    uniform float uTime, uSeed;
-    uniform float uTexFreq, uTexWarp, uBaseNm, uAmpNm, uVibrance, uPastel;
-    varying vec3 vWorldPos;
-    varying vec3 vNormalW;
-
-    vec2 rot2(vec2 p, float a){ float c=cos(a), s=sin(a); return mat2(c,-s,s,c)*p; }
-
-    float stripeField(vec3 p, float freq, float warp, float t, float seed) {
-      float a = seed * 6.2831853 + t * 0.15;
-      vec2 q = rot2(p.xy + vec2(0.35*sin(t*0.33), 0.22*cos(t*0.27)), a);
-      float s = sin(q.x * freq + 0.65*q.y + 0.7*sin(q.y*0.5 + t*0.5));
-      float w = sin((q.x+q.y) * freq * 0.35 + 1.7*sin(q.x*0.8 + t*0.2));
-      return 0.5 + 0.5 * mix(s, w, clamp(warp, 0.0, 1.0));
-    }
-
-    vec3 thinFilm(float ndv, float d_nm, float n2) {
-      float n1 = 1.0, n3 = 1.50;
-      float sin2 = max(0.0, 1.0 - ndv*ndv);
-      float cos2 = sqrt(max(0.0, 1.0 - sin2/(n2*n2)));
-      float R12 = pow((n1 - n2)/(n1 + n2), 2.0);
-      float R23 = pow((n2 - n3)/(n2 + n3), 2.0);
-      float A = 2.0 * sqrt(R12 * R23);
-      float PI4 = 12.56637061435917295385;
-      float lR = 650.0, lG = 510.0, lB = 440.0;
-      float phiR = PI4*n2*d_nm*cos2 / lR;
-      float phiG = PI4*n2*d_nm*cos2 / lG;
-      float phiB = PI4*n2*d_nm*cos2 / lB;
-      float rR = clamp(R12 + R23 + A * cos(phiR), 0.0, 1.0);
-      float rG = clamp(R12 + R23 + A * cos(phiG), 0.0, 1.0);
-      float rB = clamp(R12 + R23 + A * cos(phiB), 0.0, 1.0);
-      return vec3(rR, rG, rB);
-    }
-  ` + shader.fragmentShader;
-
-  // Add emissive contribution (vibrant stripes)
-  shader.fragmentShader = shader.fragmentShader.replace(
-    '#include <emissivemap_fragment>',
-    `
-      #include <emissivemap_fragment>
-      {
-        vec3 N = normalize(vNormalW);
-        vec3 V = normalize(cameraPosition - vWorldPos);
-        float ndv = clamp(dot(N, V), 0.0, 1.0);
-
-        float f = stripeField(vWorldPos * 0.7 + N * 0.25, uTexFreq, uTexWarp, uTime, uSeed);
-        float d_nm = uBaseNm + uAmpNm * (f - 0.5) * 2.0;
-
-        vec3 filmRGB = thinFilm(ndv, d_nm, 1.35);
-        filmRGB = mix(filmRGB, vec3(1.0), clamp(uPastel, 0.0, 1.0));
-
-        totalEmissiveRadiance += filmRGB * uVibrance;
-      }
-    `
-  );
-
-  material.userData.shader = shader;
+  material.userData.shader = sh;
 };
 material.needsUpdate = true;
 
-/* ===== Mesh ===== */
-const shard = new THREE.Mesh(makeConvexShard(seed, 1.0), material);
-shard.rotation.set(0.32, -0.18, 0.12);
-scene.add(shard);
+/* =======================
+   Post pipeline (feedback)
+   ======================= */
+const postScene = new THREE.Scene();
+const postCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), new THREE.MeshBasicMaterial({ color: 0xffffff }));
+postScene.add(quad);
 
-/* ===== GUI ===== */
-const gui = new GUI({ title: 'Controls', width: 300 });
-const fTex = gui.addFolder('Texture');
-fTex.add(P, 'texFreq', 3.0, 28.0, 0.1).name('Frequency').onChange(syncUniforms);
-fTex.add(P, 'texWarp', 0.0, 1.0, 0.01).name('Warp').onChange(syncUniforms);
-fTex.add(P, 'baseNm', 250.0, 600.0, 1.0).name('Base (nm)').onChange(syncUniforms);
-fTex.add(P, 'ampNm', 0.0, 500.0, 1.0).name('Variation (nm)').onChange(syncUniforms);
-fTex.add(P, 'vibrance', 0.0, 3.0, 0.01).name('Vibrance').onChange(syncUniforms);
-fTex.add(P, 'pastel', 0.0, 1.0, 0.01).name('Pastel').onChange(syncUniforms);
+const RTScale = 1.0;
+let W = 1, H = 1;
 
-const fShape = gui.addFolder('Shape');
-fShape.add(P, 'fold', 0.0, 1.8, 0.01).name('Fold').onChange(syncUniforms);
-fShape.add(P, 'noiseAmp', 0.0, 1.2, 0.01).name('Noise Amp').onChange(syncUniforms);
-fShape.add(P, 'noiseScale', 0.2, 4.0, 0.01).name('Noise Scale').onChange(syncUniforms);
-
-const fMat = gui.addFolder('Material');
-fMat.add(P, 'envIntensity', 0.0, 3.0, 0.01).name('Env Intensity').onChange(()=> material.envMapIntensity = P.envIntensity);
-fMat.add(P, 'transmission', 0.0, 1.0, 0.01).name('Transmission').onChange(()=> material.transmission = P.transmission);
-fMat.add(P, 'thickness', 0.0, 2.0, 0.01).name('Thickness').onChange(()=> material.thickness = P.thickness);
-fMat.add(P, 'ior', 1.0, 2.0, 0.001).name('IOR').onChange(()=> material.ior = P.ior);
-fMat.add(P, 'roughness', 0.0, 1.0, 0.001).name('Roughness').onChange(()=> material.roughness = P.roughness);
-fMat.add(P, 'clearcoat', 0.0, 1.0, 0.001).name('Clearcoat').onChange(()=> material.clearcoat = P.clearcoat);
-fMat.add(P, 'clearcoatRoughness', 0.0, 1.0, 0.001).name('Clearcoat Rough.').onChange(()=> material.clearcoatRoughness = P.clearcoatRoughness);
-fMat.add(P, 'iridescence', 0.0, 1.0, 0.001).name('PBR Iridescence').onChange(()=> material.iridescence = P.iridescence);
-fMat.add(P, 'iriMinNm', 0.0, 1000.0, 1.0).name('Iri Min (nm)').onChange(()=> material.iridescenceThicknessRange = [P.iriMinNm, P.iriMaxNm]);
-fMat.add(P, 'iriMaxNm', 0.0, 2000.0, 1.0).name('Iri Max (nm)').onChange(()=> material.iridescenceThicknessRange = [P.iriMinNm, P.iriMaxNm]);
-
-const fMotion = gui.addFolder('Motion');
-fMotion.add(P, 'speed', 0.0, 3.0, 0.01).name('Speed');
-fMotion.add(P, 'autoRotate').name('Auto Rotate');
-
-gui.add(P, 'reseed').name('Reseed Shape');
-
-function syncUniforms() {
-  const sh = material.userData.shader; if (!sh) return;
-  sh.uniforms.uFold.value       = P.fold;
-  sh.uniforms.uNoiseAmp.value   = P.noiseAmp;
-  sh.uniforms.uNoiseScale.value = P.noiseScale;
-
-  sh.uniforms.uTexFreq.value    = P.texFreq;
-  sh.uniforms.uTexWarp.value    = P.texWarp;
-  sh.uniforms.uBaseNm.value     = P.baseNm;
-  sh.uniforms.uAmpNm.value      = P.ampNm;
-  sh.uniforms.uVibrance.value   = P.vibrance;
-  sh.uniforms.uPastel.value     = P.pastel;
+function makeRT() {
+  return new THREE.WebGLRenderTarget(
+    Math.max(2, Math.floor(W * RTScale)),
+    Math.max(2, Math.floor(H * RTScale)),
+    {
+      minFilter: THREE.LinearFilter,
+      magFilter: THREE.LinearFilter,
+      depthBuffer: false,
+      stencilBuffer: false
+    }
+  );
 }
 
-function reseed(rebuildGeometry = false) {
-  seed = Math.random() * 10 + 0.01;
-  const sh = material.userData.shader;
-  if (sh) {
-    sh.uniforms.uSeed.value = seed;
-    sh.uniforms.uFoldN1.value.set(Math.random()*2-1, Math.random()*2-1, Math.random()*2-1).normalize();
-    sh.uniforms.uFoldN2.value.set(Math.random()*2-1, Math.random()*2-1, Math.random()*2-1).normalize();
+let rtScene = makeRT();
+let rtAccumA = makeRT();
+let rtAccumB = makeRT();
+let rtTemp = makeRT();
+
+const HISTORY = 8; // matches GUI max delays
+const history = new Array(HISTORY).fill(0).map(() => makeRT());
+let histIndex = 0;
+
+// Common fullscreen VS
+const fsVS = /* glsl */`
+  varying vec2 vUv;
+  void main(){
+    vUv = uv;
+    gl_Position = vec4(position.xy, 0.0, 1.0);
   }
-  if (rebuildGeometry) {
-    const g = makeConvexShard(seed, 1.0);
-    shard.geometry.dispose();
-    shard.geometry = g;
+`;
+
+// Simple 2D noise (cheap) for warp
+const noiseGLSL = /* glsl */`
+  float hash(vec2 p){ p = fract(p*vec2(123.34, 345.45)); p += dot(p, p+34.345); return fract(p.x*p.y); }
+  float noise(vec2 p){
+    vec2 i = floor(p), f = fract(p);
+    float a = hash(i), b = hash(i + vec2(1.0,0.0));
+    float c = hash(i + vec2(0.0,1.0)), d = hash(i + vec2(1.0,1.0));
+    vec2 u = f*f*(3.0-2.0*f);
+    return mix(mix(a,b,u.x), mix(c,d,u.x), u.y);
   }
+`;
+
+// Warp the previous accumulation slightly (rotate/zoom/jitter)
+const warpMat = new THREE.ShaderMaterial({
+  vertexShader: fsVS,
+  fragmentShader: /* glsl */`
+    varying vec2 vUv;
+    uniform sampler2D tPrev;
+    uniform float uRot, uZoom, uJitter, uTime;
+    ${noiseGLSL}
+    void main(){
+      vec2 uv = vUv - 0.5;
+      float c = cos(uRot), s = sin(uRot);
+      uv = mat2(c, -s, s, c) * uv;
+      uv *= (1.0 + uZoom);
+      uv += 0.5;
+
+      // Tiny domain warp for organic motion
+      float n = noise(vUv * 4.0 + uTime * 0.15);
+      vec2 jitter = (vec2(noise(vUv*8.0 + 13.1 + uTime*0.2), noise(vUv*8.0 + 91.7 - uTime*0.2)) - 0.5) * uJitter * (0.5 + n);
+      vec4 col = texture2D(tPrev, uv + jitter);
+      gl_FragColor = col;
+    }
+  `,
+  uniforms: {
+    tPrev: { value: null },
+    uRot: { value: 0 },
+    uZoom: { value: 0 },
+    uJitter: { value: 0 },
+    uTime: { value: 0 }
+  }
+});
+
+// Composite current scene with warped feedback (with decay)
+const compositeMat = new THREE.ShaderMaterial({
+  vertexShader: fsVS,
+  fragmentShader: /* glsl */`
+    varying vec2 vUv;
+    uniform sampler2D tWarped;
+    uniform sampler2D tCurr;
+    uniform float uDecay;
+    uniform float uFbGain;
+    uniform float uCurrGain;
+    void main(){
+      vec4 fb = texture2D(tWarped, vUv) * uDecay * uFbGain;
+      vec4 cur = texture2D(tCurr, vUv) * uCurrGain;
+      // additive-ish blend (looks closer to TD feedback aesthetics)
+      vec4 col = clamp(fb + cur, 0.0, 1.0);
+      gl_FragColor = col;
+    }
+  `,
+  uniforms: {
+    tWarped: { value: null },
+    tCurr: { value: null },
+    uDecay: { value: 0.95 },
+    uFbGain: { value: 1.0 },
+    uCurrGain: { value: 1.0 }
+  }
+});
+
+// Separable blur (one pass does H or V)
+const blurMat = new THREE.ShaderMaterial({
+  vertexShader: fsVS,
+  fragmentShader: /* glsl */`
+    varying vec2 vUv;
+    uniform sampler2D tInput;
+    uniform vec2 uDir;    // (1,0) or (0,1)
+    uniform float uRadius;
+    void main(){
+      vec2 texel = uDir / vec2(textureSize(tInput, 0));
+      float r = uRadius;
+      vec4 acc = vec4(0.0);
+      float wsum = 0.0;
+      // 9-tap Gaussian-ish
+      for(int i=-4;i<=4;i++){
+        float x = float(i);
+        float w = exp(-0.5 * (x*x) / (r*r + 1e-5));
+        vec2 off = x * texel;
+        acc += texture2D(tInput, vUv + off) * w;
+        wsum += w;
+      }
+      gl_FragColor = acc / max(wsum, 1e-5);
+    }
+  `,
+  uniforms: {
+    tInput: { value: null },
+    uDir: { value: new THREE.Vector2(1,0) },
+    uRadius: { value: 1.0 }
+  }
+});
+
+// Copy (for pushing into history slots)
+const copyMat = new THREE.ShaderMaterial({
+  vertexShader: fsVS,
+  fragmentShader: /* glsl */`
+    varying vec2 vUv;
+    uniform sampler2D tInput;
+    void main(){ gl_FragColor = texture2D(tInput, vUv); }
+  `,
+  uniforms: { tInput: { value: null } }
+});
+
+// Final RGBA delay + slight dispersion
+const finalMat = new THREE.ShaderMaterial({
+  vertexShader: fsVS,
+  fragmentShader: /* glsl */`
+    varying vec2 vUv;
+    uniform sampler2D t0; uniform sampler2D t1; uniform sampler2D t2; uniform sampler2D t3;
+    uniform sampler2D t4; uniform sampler2D t5; uniform sampler2D t6; uniform sampler2D t7;
+    uniform float wR[8]; uniform float wG[8]; uniform float wB[8];
+    uniform float uDispersion;
+
+    vec4 sampleIndex(int k, vec2 uv){
+      if(k==0) return texture2D(t0, uv);
+      if(k==1) return texture2D(t1, uv);
+      if(k==2) return texture2D(t2, uv);
+      if(k==3) return texture2D(t3, uv);
+      if(k==4) return texture2D(t4, uv);
+      if(k==5) return texture2D(t5, uv);
+      if(k==6) return texture2D(t6, uv);
+      return texture2D(t7, uv);
+    }
+
+    void main(){
+      // Read all history frames once
+      vec4 c0 = texture2D(t0, vUv);
+      vec4 c1 = texture2D(t1, vUv);
+      vec4 c2 = texture2D(t2, vUv);
+      vec4 c3 = texture2D(t3, vUv);
+      vec4 c4 = texture2D(t4, vUv);
+      vec4 c5 = texture2D(t5, vUv);
+      vec4 c6 = texture2D(t6, vUv);
+      vec4 c7 = texture2D(t7, vUv);
+
+      // Weighted pick per channel (selects one history slot by setting weight=1)
+      float r =
+          c0.r*wR[0] + c1.r*wR[1] + c2.r*wR[2] + c3.r*wR[3] +
+          c4.r*wR[4] + c5.r*wR[5] + c6.r*wR[6] + c7.r*wR[7];
+
+      // Slight dispersion: shift UVs a little per channel for iridescent edges
+      vec2 off = vec2(uDispersion, -uDispersion);
+      float g =
+          texture2D(t0, vUv+off).g*wG[0] + texture2D(t1, vUv+off).g*wG[1] +
+          texture2D(t2, vUv+off).g*wG[2] + texture2D(t3, vUv+off).g*wG[3] +
+          texture2D(t4, vUv+off).g*wG[4] + texture2D(t5, vUv+off).g*wG[5] +
+          texture2D(t6, vUv+off).g*wG[6] + texture2D(t7, vUv+off).g*wG[7];
+
+      vec2 off2 = vec2(-uDispersion, uDispersion);
+      float b =
+          texture2D(t0, vUv+off2).b*wB[0] + texture2D(t1, vUv+off2).b*wB[1] +
+          texture2D(t2, vUv+off2).b*wB[2] + texture2D(t3, vUv+off2).b*wB[3] +
+          texture2D(t4, vUv+off2).b*wB[4] + texture2D(t5, vUv+off2).b*wB[5] +
+          texture2D(t6, vUv+off2).b*wB[6] + texture2D(t7, vUv+off2).b*wB[7];
+
+      gl_FragColor = vec4(r, g, b, 1.0);
+    }
+  `,
+  uniforms: {
+    t0: { value: null }, t1: { value: null }, t2: { value: null }, t3: { value: null },
+    t4: { value: null }, t5: { value: null }, t6: { value: null }, t7: { value: null },
+    wR: { value: new Array(8).fill(0) },
+    wG: { value: new Array(8).fill(0) },
+    wB: { value: new Array(8).fill(0) },
+    uDispersion: { value: P.dispersion }
+  }
+});
+
+/* =======================
+   Render helpers
+   ======================= */
+function renderTo(target, mat) {
+  quad.material = mat;
+  renderer.setRenderTarget(target);
+  renderer.render(postScene, postCam);
+  renderer.setRenderTarget(null);
 }
 
-/* ===== Resize ===== */
-function panelWidth() {
-  const el = document.querySelector('.lil-gui.root');
-  return el ? Math.ceil(el.getBoundingClientRect().width) : 300;
-}
-function onResize() {
-  const w = Math.max(1, window.innerWidth - panelWidth());
-  const h = Math.max(1, window.innerHeight);
-  renderer.setSize(w, h, false);
-  renderer.domElement.style.width = w + 'px';
-  renderer.domElement.style.height = h + 'px';
-  camera.aspect = w / h;
+function resize() {
+  const panel = document.querySelector('.lil-gui.root');
+  const pad = panel ? Math.ceil(panel.getBoundingClientRect().width) : 300;
+  W = Math.max(1, window.innerWidth - pad);
+  H = Math.max(1, window.innerHeight);
+
+  renderer.setSize(W, H, false);
+  renderer.domElement.style.width = `${W}px`;
+  renderer.domElement.style.height = `${H}px`;
+  camera.aspect = W / H;
   camera.updateProjectionMatrix();
-}
-window.addEventListener('resize', onResize);
-onResize();
 
-/* ===== Animate ===== */
+  rtScene.setSize(W, H);
+  rtAccumA.setSize(W, H);
+  rtAccumB.setSize(W, H);
+  rtTemp.setSize(W, H);
+  for (const rt of history) rt.setSize(W, H);
+}
+window.addEventListener('resize', resize);
+resize();
+
+/* =======================
+   Animation loop
+   ======================= */
 const clock = new THREE.Clock();
-let time = 0;
+let tAccum = rtAccumA;
+
+function setDelayWeights() {
+  // zero all weights
+  finalMat.uniforms.wR.value = finalMat.uniforms.wR.value.map(() => 0);
+  finalMat.uniforms.wG.value = finalMat.uniforms.wG.value.map(() => 0);
+  finalMat.uniforms.wB.value = finalMat.uniforms.wB.value.map(() => 0);
+  finalMat.uniforms.wR.value[P.delayR] = 1;
+  finalMat.uniforms.wG.value[P.delayG] = 1;
+  finalMat.uniforms.wB.value[P.delayB] = 1;
+  finalMat.uniforms.uDispersion.value = P.dispersion;
+}
+
 function animate() {
   const dt = clock.getDelta();
-  time += dt * (0.6 + P.speed * 1.4);
+  const t = clock.elapsedTime * (0.6 + 1.4 * P.speed);
 
+  // Update twist + spin on the cube (continuous deformation — no cracks)
+  cube.rotation.y += (P.autoRotate ? P.spin * dt : 0);
   const sh = material.userData.shader;
-  if (sh) sh.uniforms.uTime.value = time;
-
-  if (P.autoRotate) {
-    shard.rotation.y += dt * 0.25;
-    shard.rotation.x += dt * 0.07;
+  if (sh) {
+    sh.uniforms.uTwist.value = P.twist;
+    sh.uniforms.uTime.value = t;
   }
 
-  controls.update();
+  // Render current 3D scene to texture
+  renderer.setRenderTarget(rtScene);
   renderer.render(scene, camera);
+  renderer.setRenderTarget(null);
+
+  // WARP previous accumulation
+  warpMat.uniforms.tPrev.value = tAccum.texture;
+  warpMat.uniforms.uRot.value = P.warpRotate;
+  warpMat.uniforms.uZoom.value = P.warpZoom;
+  warpMat.uniforms.uJitter.value = P.warpJitter;
+  warpMat.uniforms.uTime.value = t + seed;
+  renderTo(rtTemp, warpMat);
+
+  // COMPOSITE with current frame
+  compositeMat.uniforms.tWarped.value = rtTemp.texture;
+  compositeMat.uniforms.tCurr.value = rtScene.texture;
+  compositeMat.uniforms.uDecay.value = P.feedbackDecay;
+  compositeMat.uniforms.uFbGain.value = P.feedbackGain;
+  compositeMat.uniforms.uCurrGain.value = P.currentGain;
+  renderTo(rtAccumB, compositeMat);
+
+  // BLUR (H then V)
+  if (P.blur > 0.001) {
+    blurMat.uniforms.tInput.value = rtAccumB.texture;
+    blurMat.uniforms.uDir.value.set(1, 0);
+    blurMat.uniforms.uRadius.value = P.blur;
+    renderTo(rtTemp, blurMat);
+
+    blurMat.uniforms.tInput.value = rtTemp.texture;
+    blurMat.uniforms.uDir.value.set(0, 1);
+    renderTo(rtAccumB, blurMat);
+  }
+
+  // Push into history ring buffer (copy once into the current slot)
+  copyMat.uniforms.tInput.value = rtAccumB.texture;
+  renderTo(history[histIndex], copyMat);
+  histIndex = (histIndex + 1) % HISTORY;
+
+  // Prepare final RGBA delay weights & bindings
+  setDelayWeights();
+  // Re-bind t0..t7 so that index 0 = newest, 7 = oldest
+  for (let i = 0; i < HISTORY; i++) {
+    // newest at index 0
+    const slot = (histIndex - 1 - i + HISTORY) % HISTORY;
+    finalMat.uniforms['t'+i].value = history[slot].texture;
+  }
+
+  // Draw final to screen
+  quad.material = finalMat;
+  renderer.setRenderTarget(null);
+  renderer.render(postScene, postCam);
+
+  // Ping-pong accumulators
+  const tmp = tAccum; tAccum = rtAccumB; rtAccumB = tmp;
+
   requestAnimationFrame(animate);
 }
 requestAnimationFrame(animate);
