@@ -256,5 +256,8 @@ class CrystalGrid {
     }
 }
 
-// Start the application
-new CrystalGrid();
+// Wait for the HTML to load, then start the application
+window.addEventListener('DOMContentLoaded', () => {
+    new CrystalGrid();
+});
+
