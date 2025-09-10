@@ -6,7 +6,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
     :root {
-      --panel-width: 300px;
+      --panel-width: 320px;
       --bg: #000;
       --text: #e7e7e7;
       --accent: #8fd3ff;
@@ -49,14 +49,10 @@
       width: calc(var(--panel-width) - 16px) !important;
       max-width: calc(var(--panel-width) - 16px) !important;
     }
-    a, a:visited { color: #8fd3ff; text-decoration: none; }
-    a:hover { text-decoration: underline; }
   </style>
 
-  <!-- Polyfill so import maps work everywhere that supports ESM -->
+  <!-- Import maps (so bare specifiers like "three" work in the browser) -->
   <script async src="https://unpkg.com/es-module-shims@^2/dist/es-module-shims.js"></script>
-
-  <!-- Import map: map bare specifiers to CDN URLs -->
   <script type="importmap">
   {
     "imports": {
@@ -71,14 +67,13 @@
     <div id="scene-container" aria-label="Three.js canvas host"></div>
     <aside id="ui">
       <div class="brand">
-        <b>Endless Fold</b> — rigid faces, hinge only<br/>
-        Iridescence + banded interference (IBL)
+        <b>Endless Fold</b> — rigid faces; welded hinges<br/>
+        Iridescence + stripes + cellular + fBm
       </div>
       <!-- lil-gui will be appended here -->
     </aside>
   </div>
 
-  <!-- App script (ESM) -->
   <script type="module" src="./main.js"></script>
 </body>
 </html>
