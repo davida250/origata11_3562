@@ -1,416 +1,462 @@
-import * as THREE from 'three';
-import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
-import GUI from 'lil-gui';
+// Endless Folding Iridescent Polyhedron (no morphs; rigid faces rotating on hinges)
+// Ready-to-run ESM script. Drop beside index.html and open the HTML file.
+//
+// Dependencies (loaded via ESM imports below):
+//  - three.js     (r161+): MeshPhysicalMaterial with iridescence, PMREM/IBL
+//  - OrbitControls: camera navigation
+//  - RoomEnvironment: neutral indoor HDRI baked with PMREM
+//  - lil-gui      (0.20+): control panel
+//
+// Key references used while implementing this file:
+// - MeshPhysicalMaterial iridescence API (iridescence, iridescenceIOR, iridescenceThicknessRange).  https://threejs.org/docs/api/en/materials/MeshPhysicalMaterial.html
+// - PMREMGenerator & RoomEnvironment for prefiltered IBL.                                            https://threejs.org/docs/api/en/extras/PMREMGenerator.html
+// - onBeforeCompile to safely extend built-in materials.                                            https://threejs.org/docs/
+// - lil-gui docs (CDN + usage).                                                                    https://lil-gui.georgealways.com/
 
-/* ============================================================================
-   Boot after DOM ready
-============================================================================ */
-if (document.readyState === 'loading') window.addEventListener('DOMContentLoaded', start);
-else start();
+import * as THREE from 'https://unpkg.com/three@0.161.0/build/three.module.js';
+import { OrbitControls } from 'https://unpkg.com/three@0.161.0/examples/jsm/controls/OrbitControls.js';
+import { RoomEnvironment } from 'https://unpkg.com/three@0.161.0/examples/jsm/environments/RoomEnvironment.js';
+import GUI from 'https://cdn.jsdelivr.net/npm/lil-gui@0.20/+esm';
 
-function start() {
-  /* ------------------------------------------------------------------------ */
-  /* Canvas + GL                                                              */
-  /* ------------------------------------------------------------------------ */
-  const container = document.getElementById('viewport');
-  const canvas = document.createElement('canvas');
-  canvas.id = 'three-canvas';
-  container.appendChild(canvas);
+// ---------- Scene bootstrap ----------
+const container = document.getElementById('scene-container');
 
-  const glAttribs = { antialias: true, alpha: false, premultipliedAlpha: false, powerPreference: 'high-performance' };
-  const gl = canvas.getContext('webgl2', glAttribs) || canvas.getContext('webgl', glAttribs);
-  if (!gl) { alert('WebGL not available'); return; }
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(container.clientWidth, container.clientHeight);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.1;
+renderer.outputColorSpace = THREE.SRGBColorSpace; // r152+ linear workflow default (see three.js color mgmt update).
+container.appendChild(renderer.domElement);
 
-  /* ------------------------------------------------------------------------ */
-  /* Renderer / Scene / Camera / Controls                                     */
-  /* ------------------------------------------------------------------------ */
-  const renderer = new THREE.WebGLRenderer({ canvas, context: gl });
-  renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
-  renderer.setSize(container.clientWidth, container.clientHeight);
-  renderer.outputColorSpace = THREE.SRGBColorSpace;
-  renderer.toneMapping = THREE.ACESFilmicToneMapping;
-  renderer.toneMappingExposure = 1.05;
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x000000);
 
-  const scene = new THREE.Scene();
-  scene.background = new THREE.Color(0x000000);
+// Camera
+const camera = new THREE.PerspectiveCamera(36, container.clientWidth / container.clientHeight, 0.01, 100);
+camera.position.set(3.0, 1.7, 4.5);
 
-  const camera = new THREE.PerspectiveCamera(45, container.clientWidth / container.clientHeight, 0.1, 100);
-  camera.position.set(3.8, 2.4, 4.8);
+// Controls
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.06;
+controls.minDistance = 2.0;
+controls.maxDistance = 9.0;
 
-  const controls = new OrbitControls(camera, renderer.domElement);
-  controls.enableDamping = true;
-  controls.dampingFactor = 0.06;
+// Environment (PMREM + RoomEnvironment)
+const pmrem = new THREE.PMREMGenerator(renderer);
+const roomEnv = new RoomEnvironment(renderer);
+const envRT = pmrem.fromScene(roomEnv);
+scene.environment = envRT.texture;  // PMREM-preprocessed env map for correct roughness response. (PMREM docs)
+roomEnv.dispose();
 
-  // PMREM + RoomEnvironment → correct PBR lighting for PhysicalMaterial. :contentReference[oaicite:1]{index=1}
-  const pmrem = new THREE.PMREMGenerator(renderer);
-  scene.environment = pmrem.fromScene(new RoomEnvironment()).texture;
+// ---------- Rigid-Face Foldable Object ----------
+/**
+ * We build a small irregular octahedron-like cluster with 8 triangular faces.
+ * Each face is a rigid triangle. Faces are connected by revolute hinges (edges)
+ * arranged in a tree (so there is no conflicting loop constraint).
+ *
+ * Geometry is updated each frame by applying hierarchical hinge rotations
+ * about current world-space edge axes of the parent face. No morphing.
+ */
+class RigidHingePoly {
+  /**
+   * @param {Object} opts
+   *   opts.material: THREE.Material
+   */
+  constructor(opts = {}) {
+    this.group = new THREE.Group();
 
-  /* ------------------------------------------------------------------------ */
-  /* Parameters                                                               */
-  /* ------------------------------------------------------------------------ */
-  const P = {
-    // Folding
-    play: true,
-    speed: 0.34,            // global speed
-    amplitudeDeg: 95,       // how far the folds swing
-    stagger: 0.55,          // time offset between hinges
-    autoRotate: false,
+    // --- Define an irregular octahedron in object space (rest state) ---
+    // Top/bottom apices and four equatorial points (irregular).
+    const a = 1.00;
+    const V = [
+      new THREE.Vector3( 0.00,  a,   0.00),    // v0 top
+      new THREE.Vector3( 0.95,  0.02, 0.35),   // v1 equator
+      new THREE.Vector3(-0.55,  0.01, 0.90),   // v2 equator
+      new THREE.Vector3(-0.95, -0.02,-0.35),   // v3 equator
+      new THREE.Vector3( 0.60,  0.00,-0.95),   // v4 equator
+      new THREE.Vector3( 0.00, -a,   0.00)     // v5 bottom
+    ];
 
-    // Material / “contact‑sheet” look
-    iridescence: 1.0,       // thin‑film layer (MeshPhysicalMaterial) :contentReference[oaicite:2]{index=2}
-    iriIOR: 1.35,
-    iriMinNm: 120,
-    iriMaxNm: 950,
-    transmission: 0.04,     // a hint of translucency makes edges glow
-    thickness: 0.65,
-    roughness: 0.12,
-    clearcoat: 1.0,
-    clearcoatRoughness: 0.22,
-    envIntensity: 1.25,
+    // Triangular faces (8), each as indices into V (rest state).
+    // Top cap (4) + bottom cap (4)
+    const F = [
+      [0,1,2],
+      [0,2,3],
+      [0,3,4],
+      [0,4,1],
+      [5,2,1],
+      [5,3,2],
+      [5,4,3],
+      [5,1,4]
+    ];
 
-    // Birefringent / diffractive stripes (shader overlay through onBeforeCompile) :contentReference[oaicite:3]{index=3}
-    bandScale: 26.0,
-    bandStrength: 0.95,
-    bandSharpness: 9.0,
-    bandMix: 0.55,
-    bandPhase: 0.0,
-    edgeGlow: 1.35
-  };
+    // --- Build "face nodes": duplicate vertices per face (rigid face surfaces) ---
+    // Each face node knows its own rest-space triangle, and its hinge relationship to a parent face.
+    // We'll arrange faces into a tree (root + children).
+    const faces = F.map((tri, idx) => ({
+      id: idx,
+      // rest-space vertices (duplicated for this face)
+      rest: tri.map(i => V[i].clone()),
+      world: [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()],  // filled per-frame
+      parent: null,
+      // hinge descriptor: { parent, parentEdge:[ia,ib], childEdge:[ia,ib], amp, freq, phase }
+      hinge: null
+    }));
 
-  /* ------------------------------------------------------------------------ */
-  /* Geometry — Irregular bipyramid (N-gon ring + top/bottom)                 */
-  /* Why this shape? The contact sheet silhouettes look like a rigid “paper”
-     core with ears/petals. A jittered bipyramid provides the same family of
-     silhouettes while staying convex at rest. We’ll fold along explicit
-     edges so it self-overlaps but remains cohesive (no polygon explosion).
-  ------------------------------------------------------------------------ */
-  const N = 6;                 // ring vertex count (5–7 look good)
-  const R = 1.25;              // ring radius
-  const H = 1.25;              // half height
-  const jitterR = 0.12;        // small irregularity to avoid symmetry
-  const jitterY = 0.07;
+    // --- Hinge tree ---
+    // Root face = 0 (top wedge 0-1-2).
+    // Children attached along specific shared edges; angles are animated later.
+    // NOTE: parentEdge is specified in *parent face's local vertex indices*, childEdge in *child's*.
+    const bind = (child, parent, parentEdge, childEdge, ampDeg, freq, phase) => {
+      faces[child].parent = parent;
+      faces[child].hinge = { parent, parentEdge, childEdge, amp: THREE.MathUtils.degToRad(ampDeg), freq, phase };
+    };
 
-  const verts = [];
-  // ring
-  for (let i = 0; i < N; i++) {
-    const t = (i / N) * Math.PI * 2;
-    const jr = (Math.random() * 2 - 1) * jitterR;
-    const jy = (Math.random() * 2 - 1) * jitterY;
-    verts.push(new THREE.Vector3(Math.cos(t) * (R + jr), jy, Math.sin(t) * (R + jr)));
-  }
-  const top = new THREE.Vector3(0, H, 0);
-  const bottom = new THREE.Vector3(0, -H, 0);
-  const topIndex = verts.push(top) - 1;
-  const bottomIndex = verts.push(bottom) - 1;
+    // Top-ring attachments around the apex:
+    bind(1, 0, [0,2], [0,1], 65, 0.11, 0.0);  // face1 about edge (v0,v2)
+    bind(2, 1, [0,2], [0,1], 60, 0.13, 1.1);  // face2 about edge (v0,v3) via face1
+    bind(3, 2, [0,2], [0,1], 55, 0.10, 2.3);  // face3 about edge (v0,v4) via face2
 
-  // Triangles: top→ring and bottom→ring
-  const indices = [];
-  for (let i = 0; i < N; i++) {
-    const a = i;
-    const b = (i + 1) % N;
-    indices.push(topIndex, a, b);     // top face
-    indices.push(bottomIndex, b, a);  // bottom face
-  }
+    // Bottom faces attach off a top face and then chain:
+    bind(4, 0, [1,2], [1,2], 70, 0.17, 0.6);  // face4 about equator edge (v1,v2)
+    bind(5, 4, [0,1], [0,1], 65, 0.09, 1.7);  // face5 about (v5,v2)
+    bind(6, 5, [0,1], [0,1], 62, 0.14, 2.6);  // face6 about (v5,v3)
+    bind(7, 6, [0,1], [0,1], 68, 0.12, 3.7);  // face7 about (v5,v4)
 
-  // Build BufferGeometry (indexed!)
-  const geo = new THREE.BufferGeometry();
-  const posArr = new Float32Array(verts.length * 3);
-  for (let i = 0; i < verts.length; i++) {
-    posArr[i*3] = verts[i].x; posArr[i*3+1] = verts[i].y; posArr[i*3+2] = verts[i].z;
-  }
-  geo.setAttribute('position', new THREE.BufferAttribute(posArr, 3));
-  geo.setIndex(indices);
-  geo.computeVertexNormals();
-  const basePositions = geo.attributes.position.array.slice(); // immutable baseline for deformation
+    // Root has no hinge
+    faces[0].hinge = null;
 
-  /* ------------------------------------------------------------------------ */
-  /* Material: Physical + custom birefringence/diffraction overlay            */
-  /* - Thin‑film iridescence from MeshPhysicalMaterial (official).            */
-  /* - Striped interference overlay injected with onBeforeCompile.            */
-  /*   (Three.js supports this for extending materials.)                      */
-  /*   Bands are oriented per-facet using a TBN-like basis from normal.       */
-  /*   Two band sets blended -> moiré; Fresnel rim lifts edges.               */
-  /* References: onBeforeCompile usage / thin‑film & birefringence background */
-  /*   docs/discussions. :contentReference[oaicite:4]{index=4}           */
-  const material = new THREE.MeshPhysicalMaterial({
-    color: 0xffffff,
-    side: THREE.DoubleSide,
-    flatShading: true,
-    metalness: 0.08,
-    roughness: P.roughness,
-    clearcoat: P.clearcoat,
-    clearcoatRoughness: P.clearcoatRoughness,
-    envMapIntensity: P.envIntensity,
-    ior: 1.5,
-    transmission: P.transmission,
-    thickness: P.thickness,
-    attenuationColor: new THREE.Color(0xffffff),
-    attenuationDistance: 1.5,
-    iridescence: P.iridescence,
-    iridescenceIOR: P.iriIOR,
-    iridescenceThicknessRange: [P.iriMinNm, P.iriMaxNm]
-  });
+    // Order faces for hierarchical update (parent before child).
+    this.faceOrder = [0,1,2,3,4,5,6,7];
 
-  material.onBeforeCompile = (shader) => {
-    shader.uniforms.uTime = { value: 0.0 };
-    shader.uniforms.uBandScale = { value: P.bandScale };
-    shader.uniforms.uBandStrength = { value: P.bandStrength };
-    shader.uniforms.uBandSharpness = { value: P.bandSharpness };
-    shader.uniforms.uBandMix = { value: P.bandMix };
-    shader.uniforms.uBandPhase = { value: P.bandPhase };
-    shader.uniforms.uEdgeGlow = { value: P.edgeGlow };
+    // --- Geometry with duplicated vertices per face (flat-shaded rigid triangles) ---
+    const positions = new Float32Array(faces.length * 3 * 3);
+    const normals   = new Float32Array(faces.length * 3 * 3);
 
-    shader.vertexShader = `
-      varying vec3 vWorldPos;
-      varying vec3 vWorldNormal;
-    ` + shader.vertexShader
-      .replace('#include <beginnormal_vertex>', `
-        #include <beginnormal_vertex>
-        vWorldNormal = normalize( mat3( modelMatrix ) * objectNormal );
-      `)
-      .replace('#include <begin_vertex>', `
-        #include <begin_vertex>
-        vWorldPos = ( modelMatrix * vec4( transformed, 1.0 ) ).xyz;
-      `);
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geometry.setAttribute('normal',   new THREE.BufferAttribute(normals,   3));
+    geometry.setIndex([...Array(faces.length*3).keys()]); // sequential triangles
+    geometry.computeBoundingSphere();
 
-    shader.fragmentShader = `
-      uniform float uTime, uBandScale, uBandStrength, uBandSharpness, uBandMix, uBandPhase, uEdgeGlow;
-      varying vec3 vWorldPos;
-      varying vec3 vWorldNormal;
+    // Material (physical, with iridescence). We'll add the stripe overlay in onBeforeCompile.
+    const mat = (opts.material instanceof THREE.Material)
+      ? opts.material
+      : new THREE.MeshPhysicalMaterial({
+          color: 0x151515,        // base is dark; sheen comes from iridescence+stripes
+          roughness: 0.25,
+          metalness: 0.0,
+          envMapIntensity: 1.0,
+          iridescence: 1.0,       // intensity of the effect
+          iridescenceIOR: 1.3,
+          iridescenceThicknessRange: [120, 600], // soap-film gamut (nm)
+          flatShading: true
+        });
 
-      // Approximate spectral ramp (0..1 → RGB) used in GPU literature. :contentReference[oaicite:5]{index=5}
-      vec3 spectral(float x){
-        x = clamp(fract(x), 0.0, 1.0);
-        return clamp(vec3(
-          abs(x*6.0-3.0)-1.0,
-          2.0-abs(x*6.0-2.0),
-          2.0-abs(x*6.0-4.0)
-        ), 0.0, 1.0);
-      }
-    ` + shader.fragmentShader
-      .replace('#include <begin_fragment>', `
-        #include <begin_fragment>
-        vec3 N = normalize(vWorldNormal);
-        vec3 helper = (abs(N.y) > 0.98) ? vec3(1.0,0.0,0.0) : vec3(0.0,1.0,0.0);
-        vec3 T = normalize(cross(N, helper)); // per-facet tangent
-        vec3 B = normalize(cross(N, T));      // per-facet bitangent
+    // Stripe overlay via onBeforeCompile (adds emissive contribution oriented in world-space).
+    this._injectStripeOverlay(mat);
 
-        // Two "birefringent" band sets projected along T and B.
-        float a = dot(vWorldPos, T) * uBandScale + uBandPhase + uTime*0.35;
-        float b = dot(vWorldPos, B) * (uBandScale*0.66) - (uBandPhase*1.37) + uTime*0.23;
+    const mesh = new THREE.Mesh(geometry, mat);
+    mesh.castShadow = false;
+    mesh.receiveShadow = false;
 
-        float s1 = 0.5 + 0.5 * sin(a);
-        float s2 = 0.5 + 0.5 * sin(b);
+    this.group.add(mesh);
 
-        // Sharpen bands → crisp grating, then mix.
-        float k = 0.5 / max(uBandSharpness, 1.0);
-        s1 = smoothstep(0.5 - k, 0.5 + k, s1);
-        s2 = smoothstep(0.5 - k, 0.5 + k, s2);
-        float bands = mix(s1, s2, uBandMix);
+    // Persist for updates
+    this.faces = faces;
+    this.mesh = mesh;
+    this.geometry = geometry;
 
-        vec3 rainbow = spectral(bands);
-        diffuseColor.rgb = mix(diffuseColor.rgb, diffuseColor.rgb + rainbow, uBandStrength);
+    // Pre-allocate matrices per face for hierarchical transforms
+    this._mTranslateA = new THREE.Matrix4();
+    this._mTranslateNegA = new THREE.Matrix4();
+    this._mRotate = new THREE.Matrix4();
 
-        // Fresnel-ish edge lift for the bright rims visible in the contact sheet
-        vec3 V = normalize(cameraPosition - vWorldPos);
-        float fres = pow(1.0 - max(dot(normalize(N), V), 0.0), 3.0);
-        diffuseColor.rgb += fres * uEdgeGlow * 0.13;
-      `);
+    // world matrix per face (object-space transform for that face)
+    this._M = faces.map(() => new THREE.Matrix4());
 
-    material.userData.shader = shader;
-  };
+    // Precompute an adjacency list for children
+    this.children = new Map();
+    faces.forEach((f, i) => this.children.set(i, []));
+    faces.forEach((f, i) => { if (f.parent !== null) this.children.get(f.parent).push(i); });
 
-  const mesh = new THREE.Mesh(geo, material);
-  scene.add(mesh);
-
-  /* ------------------------------------------------------------------------ */
-  /* HINGE ENGINE — explicit edge hinges with BFS partition                   */
-  /* 1) Build adjacency + edge→faces map from indexed triangles.              */
-  /* 2) For each hinge (edge AB) choose the “wing” side using the triangle    */
-  /*    opposite vertex as the BFS seed.                                      */
-  /* 3) On each frame: reset verts to baseline, then rotate affected side     */
-  /*    around the AB axis by a phase-shifted ping-pong angle.                */
-  /* This produces clean folds without polygon separation.                    */
-  /* References motivating the approach: rotating around arbitrary axes;      */
-  /* pivot/hinge patterns; material extension via onBeforeCompile.            */
-  /* :contentReference[oaicite:6]{index=6}                                 */
-  const tri = geo.getIndex().array;
-  const vcount = geo.attributes.position.count;
-
-  // adjacency (undirected)
-  const neighbors = Array.from({ length: vcount }, () => new Set());
-  const edgeKey = (a, b) => a < b ? `${a}_${b}` : `${b}_${a}`;
-  const edgeFaces = new Map(); // edgeKey -> [faceIdx0, faceIdx1]
-  for (let i = 0; i < tri.length; i += 3) {
-    const a = tri[i], b = tri[i+1], c = tri[i+2];
-    const edges = [[a,b],[b,c],[c,a]];
-    edges.forEach(([u,v]) => {
-      neighbors[u].add(v); neighbors[v].add(u);
-      const k = edgeKey(u,v);
-      if (!edgeFaces.has(k)) edgeFaces.set(k, []);
-      edgeFaces.get(k).push(i); // store face start index
-    });
+    // Kick an initial update
+    this.update(0);
   }
 
-  function bfsSide(blockA, blockB, seed) {
-    // BFS from seed while NOT crossing the blocked edge (blockA<->blockB)
-    const q = [seed];
-    const visited = new Array(vcount).fill(false);
-    visited[seed] = true;
-    while (q.length) {
-      const v = q.shift();
-      for (const n of neighbors[v]) {
-        if ((v === blockA && n === blockB) || (v === blockB && n === blockA)) continue;
-        if (!visited[n]) { visited[n] = true; q.push(n); }
-      }
-    }
-    return visited;
+  dispose() {
+    this.geometry.dispose();
+    if (this.mesh.material) this.mesh.material.dispose();
   }
 
-  function addHinge(a, b, seed, phase, sign) {
-    const origin = new THREE.Vector3().fromArray(basePositions, a*3);
-    const dir = new THREE.Vector3().fromArray(basePositions, b*3).sub(origin).normalize();
-    const affectedMask = bfsSide(a, b, seed); // boolean mask of vertices on the "folding" side
-    const affected = [];
-    for (let i = 0; i < vcount; i++) if (affectedMask[i] && i !== a && i !== b) affected.push(i);
-    hinges.push({ a, b, origin, axis: dir, affected, phase, sign });
+  // Add an emissive stripe overlay to MeshPhysicalMaterial using onBeforeCompile.
+  _injectStripeOverlay(material) {
+    const uniforms = {
+      uTime:        { value: 0 },
+      uBandAngle:   { value: 32.0 * Math.PI / 180.0 }, // radians
+      uBandFreq:    { value: 6.0 },    // cycles per scene unit
+      uBandStrength:{ value: 0.45 },   // [0..1] contribution to emissive
+      uBandSpeed:   { value: 0.25 }    // radians/sec for angle drift
+    };
+    material.onBeforeCompile = (shader) => {
+      // Attach uniforms
+      Object.assign(shader.uniforms, uniforms);
+
+      // Vertex: export world position for band mapping
+      shader.vertexShader = shader.vertexShader
+        .replace('#include <common>', `
+          #include <common>
+          varying vec3 vWorldPos;
+        `)
+        .replace('#include <project_vertex>', `
+          #include <project_vertex>
+          vWorldPos = (modelMatrix * vec4(transformed, 1.0)).xyz;
+        `);
+
+      // Fragment: oriented band field + thin-film-like rainbow palette
+      shader.fragmentShader = shader.fragmentShader
+        .replace('#include <common>', `
+          #include <common>
+          varying vec3 vWorldPos;
+          uniform float uTime;
+          uniform float uBandAngle;
+          uniform float uBandFreq;
+          uniform float uBandStrength;
+          uniform float uBandSpeed;
+
+          // Small, cheap hash noise to break band uniformity slightly
+          float n13(vec3 p) {
+            p = fract(p * 0.1031);
+            p += dot(p, p.yzx + 33.33);
+            return fract((p.x + p.y) * p.z);
+          }
+
+          // Cosine rainbow palette (soap-film vibe)
+          vec3 rainbow(float t) {
+            // t in [0,1] -> RGB rainbow
+            const float TAU = 6.28318530718;
+            vec3 phase = vec3(0.0, 0.33, 0.67) * TAU;
+            return 0.5 + 0.5 * cos(TAU * t + phase);
+          }
+        `)
+        .replace('#include <emissivemap_fragment>', `
+          #include <emissivemap_fragment>
+          {
+            float theta = uBandAngle + uTime * uBandSpeed;           // slow rotation over time
+            vec2 dir = vec2(cos(theta), sin(theta));                 // orientation in world XY
+            float coord = dot(vWorldPos.xy, dir) * uBandFreq;
+
+            // Stripe function: sinusoid -> harden via smoothstep; add tiny noise offset.
+            float s = 0.5 + 0.5 * sin(coord + n13(vWorldPos * 3.17));
+            float band = smoothstep(0.35, 0.65, s);
+
+            // Map band to a rainbow; scale by strength.
+            vec3 stripeColor = rainbow(fract(coord * 0.05 + 0.5));
+            totalEmissiveRadiance += stripeColor * (uBandStrength * band);
+          }
+        `);
+
+      // Keep a handle to update uniforms during animation
+      material.userData._stripeUniforms = uniforms;
+    };
+    material.needsUpdate = true;
   }
 
-  const hinges = [];
-  // Helper: for edge (u,v), pick “seed” as the vertex opposite (u,v) on one of the adjacent faces.
-  const oppositeVertexOnFace = (faceStart, u, v) => {
-    const fa = tri[faceStart], fb = tri[faceStart+1], fc = tri[faceStart+2];
-    if (fa !== u && fa !== v) return fa;
-    if (fb !== u && fb !== v) return fb;
-    return fc;
-  };
-
-  // Build three classes of hinges: top↔ring, bottom↔ring, and ring↔ring (valleys)
-  for (let i = 0; i < N; i++) {
-    const r = i;
-    const rNext = (i + 1) % N;
-
-    // Top-ring hinge (edge topIndex—r). Take seed as the opposite vertex on the top triangle.
-    const kTop = edgeKey(topIndex, r);
-    const fTop = edgeFaces.get(kTop)[0]; // there is always exactly one adjacent "top" face in our mesh
-    const seedTop = oppositeVertexOnFace(fTop, topIndex, r);
-    addHinge(topIndex, r, seedTop, i * P.stagger, +1.0);
-
-    // Bottom-ring hinge (edge bottomIndex—r). Seed from bottom triangle.
-    const kBot = edgeKey(bottomIndex, r);
-    const fBot = edgeFaces.get(kBot)[0];
-    const seedBot = oppositeVertexOnFace(fBot, bottomIndex, r);
-    addHinge(bottomIndex, r, seedBot, (i + 0.5) * P.stagger, -1.0);
-
-    // Ring-ring hinge (edge r—rNext). Seed from one of its two faces (pick the top one if present).
-    const kRing = edgeKey(r, rNext);
-    const faces = edgeFaces.get(kRing);
-    const seedRing = oppositeVertexOnFace(faces[0], r, rNext);
-    addHinge(r, rNext, seedRing, (i + 0.25) * P.stagger, (i % 2 === 0) ? 1.0 : -1.0);
+  // Helper: apply rotation around a line through A->B by angle (object-space).
+  _composeHinge(Mparent, A, B, angle, outM) {
+    const axis = new THREE.Vector3().subVectors(B, A).normalize();
+    this._mTranslateA.makeTranslation(A.x, A.y, A.z);
+    this._mTranslateNegA.makeTranslation(-A.x, -A.y, -A.z);
+    this._mRotate.makeRotationAxis(axis, angle);
+    // outM = Mparent * T(A) * R(axis,angle) * T(-A)
+    outM.copy(Mparent)
+        .multiply(this._mTranslateA)
+        .multiply(this._mRotate)
+        .multiply(this._mTranslateNegA);
   }
 
-  // Rotate a point around an axis line using Rodrigues’ formula.
-  const _a = new THREE.Vector3(), _r = new THREE.Vector3(), _p = new THREE.Vector3();
-  function rotateAroundAxis(point, origin, axis, angle) {
-    _p.copy(point).sub(origin);
-    const cos = Math.cos(angle), sin = Math.sin(angle);
-    _a.copy(axis);
-    _r.copy(_p).multiplyScalar(cos)
-      .add(_a.clone().cross(_p).multiplyScalar(sin))
-      .add(_a.multiplyScalar(_a.dot(_p) * (1.0 - cos)));
-    return _r.add(origin);
-  }
+  // Update all face transforms; t in seconds.
+  update(t) {
+    // Primary non-repeating driver: sum of incommensurate sines -> quasi-periodic
+    const q = (f, p) => Math.sin(2 * Math.PI * f * t + p);
 
-  // Folding step (from immutable baseline each frame → cohesive mesh)
-  const posAttr = geo.attributes.position;
-  const pos = posAttr.array;
-  function applyFolds(t) {
-    const maxA = THREE.MathUtils.degToRad(P.amplitudeDeg);
+    // Compute transform for root (identity in object space).
+    this._M[0].identity();
 
-    for (let i = 0; i < vcount; i++) {
-      pos[i*3]   = basePositions[i*3];
-      pos[i*3+1] = basePositions[i*3+1];
-      pos[i*3+2] = basePositions[i*3+2];
+    // Walk faces in parent-first order; compute each child from its parent.
+    for (let i = 1; i < this.faceOrder.length; i++) {
+      const id = this.faceOrder[i];
+      const f = this.faces[id];
+      const h = f.hinge;
+      const Mparent = this._M[h.parent];
+
+      // Hinge axis endpoints in parent face's current coords.
+      const A = this.faces[h.parent].rest[h.parentEdge[0]].clone().applyMatrix4(Mparent);
+      const B = this.faces[h.parent].rest[h.parentEdge[1]].clone().applyMatrix4(Mparent);
+
+      // Angle = amplitude * sin(2π f t + phase) ; small additive wobble
+      const angle = h.amp * q(h.freq, h.phase) + 0.12 * Math.sin(2 * Math.PI * 0.05 * t + id);
+
+      // Compose child transform relative to parent
+      this._composeHinge(Mparent, A, B, angle, this._M[id]);
     }
 
-    for (let h = 0; h < hinges.length; h++) {
-      const H = hinges[h];
-      // phase‑shifted ping‑pong with smoothstep ease → clear delayed folding rhythm
-      const tt = (t * P.speed + H.phase);
-      const tri = Math.abs((tt % 2) - 1);                  // 0..1..0
-      const eased = tri * tri * (3 - 2 * tri);             // smoothstep
-      const angle = (eased - 0.5) * 2.0 * maxA * H.sign;
+    // Optional global presentation yaw/pitch (slow)
+    const yaw   = 0.25 * Math.sin(2 * Math.PI * 0.03 * t);
+    const pitch = 0.18 * Math.sin(2 * Math.PI * 0.021 * t + 1.2);
+    const Mglobal = new THREE.Matrix4().makeRotationFromEuler(new THREE.Euler(pitch, yaw, 0, 'YXZ'));
 
-      // Rotate the affected side; hinge edge vertices (a,b) stay on axis.
-      for (let k = 0; k < H.affected.length; k++) {
-        const vi = H.affected[k];
-        const i3 = vi * 3;
-        const p = _p.set(basePositions[i3], basePositions[i3+1], basePositions[i3+2]);
-        const q = rotateAroundAxis(p, H.origin, H.axis, angle);
-        pos[i3] = q.x; pos[i3+1] = q.y; pos[i3+2] = q.z;
-      }
+    // Update vertex positions & face normals (flat shading)
+    const pos = this.geometry.getAttribute('position');
+    const nrm = this.geometry.getAttribute('normal');
+
+    let vOffset = 0;
+    let nOffset = 0;
+    const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3();
+
+    for (let i = 0; i < this.faces.length; i++) {
+      const M = new THREE.Matrix4().multiplyMatrices(Mglobal, this._M[i]);
+      const fr = this.faces[i].rest;
+
+      // Transform all 3 vertices of the face
+      const w0 = this.faces[i].world[0].copy(fr[0]).applyMatrix4(M);
+      const w1 = this.faces[i].world[1].copy(fr[1]).applyMatrix4(M);
+      const w2 = this.faces[i].world[2].copy(fr[2]).applyMatrix4(M);
+
+      pos.setXYZ(vOffset + 0, w0.x, w0.y, w0.z);
+      pos.setXYZ(vOffset + 1, w1.x, w1.y, w1.z);
+      pos.setXYZ(vOffset + 2, w2.x, w2.y, w2.z);
+
+      // Flat normal
+      a.subVectors(w1, w0);
+      b.subVectors(w2, w0);
+      c.copy(a).cross(b).normalize();
+
+      nrm.setXYZ(nOffset + 0, c.x, c.y, c.z);
+      nrm.setXYZ(nOffset + 1, c.x, c.y, c.z);
+      nrm.setXYZ(nOffset + 2, c.x, c.y, c.z);
+
+      vOffset += 3;
+      nOffset += 3;
     }
-    posAttr.needsUpdate = true;
-    geo.computeVertexNormals(); // keep flat facets consistent
-  }
 
-  /* ------------------------------------------------------------------------ */
-  /* GUI                                                                      */
-  /* ------------------------------------------------------------------------ */
-  const gui = new GUI({ container: document.getElementById('ui'), width: 280, title: 'Controls' });
-  gui.add(P, 'play').name('Play/Pause');
-  gui.add(P, 'autoRotate').name('Auto rotate');
-  gui.add(P, 'speed', 0.05, 1.5, 0.01).name('Fold speed');
-  gui.add(P, 'amplitudeDeg', 10, 150, 1).name('Fold amplitude (°)');
-  gui.add(P, 'stagger', 0.0, 1.5, 0.01).name('Time offset');
+    pos.needsUpdate = true;
+    nrm.needsUpdate = true;
 
-  const fMat = gui.addFolder('Material');
-  fMat.add(P, 'iridescence', 0.0, 1.0, 0.01).name('Iridescence').onChange(v => material.iridescence = v);
-  fMat.add(P, 'iriIOR', 1.0, 2.0, 0.01).name('Iridescence IOR').onChange(v => material.iridescenceIOR = v);
-  fMat.add(P, 'iriMinNm', 50, 500, 1).name('Iri min (nm)').onChange(() => material.iridescenceThicknessRange = [P.iriMinNm, P.iriMaxNm]);
-  fMat.add(P, 'iriMaxNm', 200, 1200, 1).name('Iri max (nm)').onChange(() => material.iridescenceThicknessRange = [P.iriMinNm, P.iriMaxNm]);
-  fMat.add(P, 'transmission', 0.0, 0.5, 0.01).name('Transmission').onChange(v => material.transmission = v);
-  fMat.add(P, 'thickness', 0.05, 2.0, 0.01).name('Thickness').onChange(v => material.thickness = v);
-  fMat.add(P, 'roughness', 0.0, 0.6, 0.001).name('Roughness').onChange(v => material.roughness = v);
-  fMat.add(P, 'clearcoat', 0.0, 1.0, 0.01).name('Clearcoat').onChange(v => material.clearcoat = v);
-  fMat.add(P, 'clearcoatRoughness', 0.0, 1.0, 0.01).name('ClearcoatRough').onChange(v => material.clearcoatRoughness = v);
-  fMat.add(P, 'envIntensity', 0.1, 3.0, 0.01).name('Env Intensity').onChange(v => material.envMapIntensity = v);
-
-  const fTex = gui.addFolder('Striped interference');
-  fTex.add(P, 'bandScale', 6.0, 60.0, 0.1).name('Band scale').onChange(v => material.userData.shader && (material.userData.shader.uniforms.uBandScale.value = v));
-  fTex.add(P, 'bandStrength', 0.0, 1.0, 0.01).name('Band strength').onChange(v => material.userData.shader && (material.userData.shader.uniforms.uBandStrength.value = v));
-  fTex.add(P, 'bandSharpness', 1.0, 20.0, 0.1).name('Band sharpness').onChange(v => material.userData.shader && (material.userData.shader.uniforms.uBandSharpness.value = v));
-  fTex.add(P, 'bandMix', 0.0, 1.0, 0.01).name('Dual mix').onChange(v => material.userData.shader && (material.userData.shader.uniforms.uBandMix.value = v));
-  fTex.add(P, 'bandPhase', -Math.PI, Math.PI, 0.01).name('Band phase').onChange(v => material.userData.shader && (material.userData.shader.uniforms.uBandPhase.value = v));
-  fTex.add(P, 'edgeGlow', 0.0, 2.5, 0.01).name('Edge glow').onChange(v => material.userData.shader && (material.userData.shader.uniforms.uEdgeGlow.value = v));
-
-  /* ------------------------------------------------------------------------ */
-  /* Resize / Input                                                           */
-  /* ------------------------------------------------------------------------ */
-  window.addEventListener('resize', () => {
-    const w = container.clientWidth, h = container.clientHeight;
-    renderer.setSize(w, h);
-    camera.aspect = w / h;
-    camera.updateProjectionMatrix();
-  });
-  window.addEventListener('keydown', (e) => { if (e.code === 'Space') P.play = !P.play; });
-
-  /* ------------------------------------------------------------------------ */
-  /* Animate                                                                  */
-  /* ------------------------------------------------------------------------ */
-  const clock = new THREE.Clock();
-  function render() {
-    const t = clock.getElapsedTime();
-    if (P.play) applyFolds(t);
-    if (material.userData.shader) {
-      material.userData.shader.uniforms.uTime.value = t;
+    // Drive stripe shader time
+    const uniforms = this.mesh.material.userData._stripeUniforms;
+    if (uniforms) {
+      uniforms.uTime.value = t;
     }
-    if (P.autoRotate) mesh.rotation.y += 0.0023;
-
-    controls.update();
-    renderer.render(scene, camera);
-    requestAnimationFrame(render);
   }
-  render();
 }
+
+// ---------- Create material + mesh ----------
+const material = new THREE.MeshPhysicalMaterial({
+  color: 0x151515,
+  roughness: 0.28,
+  metalness: 0.0,
+  envMapIntensity: 1.15,
+  iridescence: 1.0,
+  iridescenceIOR: 1.3,
+  iridescenceThicknessRange: [120, 620],
+  flatShading: true
+});
+
+const poly = new RigidHingePoly({ material });
+scene.add(poly.group);
+
+// ---------- GUI (minimal, right panel) ----------
+const uiHost = document.getElementById('ui');
+const gui = new GUI({ title: 'Controls', width: 280 });
+uiHost.appendChild(gui.domElement);
+
+const params = {
+  play: true,
+  exposure: renderer.toneMappingExposure,
+  envIntensity: 1.15,
+  iridescence: material.iridescence,
+  ior: material.iridescenceIOR,
+  filmMin: material.iridescenceThicknessRange[0],
+  filmMax: material.iridescenceThicknessRange[1],
+  bandAngleDeg: 32,
+  bandFreq: 6.0,
+  bandStrength: 0.45,
+  bandSpeed: 0.25,
+  resetCamera: () => {
+    camera.position.set(3.0, 1.7, 4.5);
+    controls.target.set(0, 0, 0);
+    controls.update();
+  }
+};
+
+gui.add(params, 'play').name('Play / Pause');
+gui.add(params, 'exposure', 0.6, 1.8, 0.01).name('Exposure')
+  .onChange(v => renderer.toneMappingExposure = v);
+gui.add(params, 'envIntensity', 0.0, 3.0, 0.01).name('IBL Intensity')
+  .onChange(v => (poly.mesh.material.envMapIntensity = v));
+
+const fIri = gui.addFolder('Iridescence');
+fIri.add(params, 'iridescence', 0.0, 1.0, 0.01).name('Amount')
+    .onChange(v => (poly.mesh.material.iridescence = v));
+fIri.add(params, 'ior', 1.0, 2.333, 0.001).name('Iridescence IOR')
+    .onChange(v => (poly.mesh.material.iridescenceIOR = v));
+fIri.add(params, 'filmMin', 50, 800, 1).name('Film Min (nm)')
+    .onChange(v => (poly.mesh.material.iridescenceThicknessRange[0] = v));
+fIri.add(params, 'filmMax', 50, 800, 1).name('Film Max (nm)')
+    .onChange(v => (poly.mesh.material.iridescenceThicknessRange[1] = v));
+
+const fBands = gui.addFolder('Interference Bands');
+fBands.add(params, 'bandAngleDeg', 0, 180, 0.1).name('Angle (°)')
+  .onChange(v => {
+    const u = poly.mesh.material.userData._stripeUniforms;
+    if (u) u.uBandAngle.value = THREE.MathUtils.degToRad(v);
+  });
+fBands.add(params, 'bandFreq', 1.0, 20.0, 0.1).name('Frequency')
+  .onChange(v => {
+    const u = poly.mesh.material.userData._stripeUniforms;
+    if (u) u.uBandFreq.value = v;
+  });
+fBands.add(params, 'bandStrength', 0.0, 1.0, 0.01).name('Strength')
+  .onChange(v => {
+    const u = poly.mesh.material.userData._stripeUniforms;
+    if (u) u.uBandStrength.value = v;
+  });
+fBands.add(params, 'bandSpeed', 0.0, 2.0, 0.001).name('Angle Speed')
+  .onChange(v => {
+    const u = poly.mesh.material.userData._stripeUniforms;
+    if (u) u.uBandSpeed.value = v;
+  });
+
+gui.add(params, 'resetCamera').name('Reset Camera');
+
+// ---------- Render loop ----------
+let start = performance.now();
+function animate() {
+  requestAnimationFrame(animate);
+
+  const now = performance.now();
+  const t = (now - start) / 1000;
+
+  if (params.play) poly.update(t);
+
+  controls.update();
+  renderer.render(scene, camera);
+}
+animate();
+
+// ---------- Resize handling ----------
+function onResize() {
+  const w = container.clientWidth;
+  const h = container.clientHeight;
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+  renderer.setSize(w, h);
+}
+window.addEventListener('resize', onResize);
+
+// Layout watcher: keep canvas sized to left column
+const ro = new ResizeObserver(onResize);
+ro.observe(container);
