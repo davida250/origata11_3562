@@ -2,27 +2,36 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Self‑Folding Decahedron</title>
+  <title>Self‑Folding Decahedron — Sequential</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
     :root { --panel-width: 360px; --bg: #000; --text: #e7e7e7; --accent: #8fd3ff; }
-    html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
-      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji"; }
+    html, body {
+      margin: 0; height: 100%;
+      background: var(--bg); color: var(--text);
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+    }
     .app { display: grid; grid-template-columns: 1fr var(--panel-width); height: 100%; width: 100%; overflow: hidden; }
     #scene-container { position: relative; background: #000; }
     canvas { display: block; }
-    #ui { border-left: 1px solid #222; background: #0b0b0b; box-shadow: inset 0 0 0 1px rgba(255,255,255,.02);
-      padding: 8px 8px 24px 8px; overflow-y: auto; }
-    .brand { font-size: 12px; letter-spacing: .05em; color: #9aa0a6; margin: 6px 8px 14px 8px;
-      border-bottom: 1px solid #161616; padding-bottom: 8px; }
+    #ui {
+      position: relative;
+      border-left: 1px solid #222;
+      background: #0b0b0b;
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,.02);
+      padding: 8px 8px 24px 8px;
+      overflow-y: auto;
+    }
+    .brand {
+      font-size: 12px; letter-spacing: .05em; color: #9aa0a6;
+      margin: 6px 8px 14px 8px; border-bottom: 1px solid #161616; padding-bottom: 8px;
+    }
     .brand b { color: var(--accent); }
     #ui .lil-gui.root { width: calc(var(--panel-width) - 16px) !important; max-width: calc(var(--panel-width) - 16px) !important; }
   </style>
 
-  <!-- Polyfill so import maps work broadly -->
+  <!-- Import maps + polyfill so bare specifiers like "three" work in the browser -->
   <script async src="https://unpkg.com/es-module-shims@^2/dist/es-module-shims.js"></script>
-
-  <!-- Import map for bare module specifiers -->
   <script type="importmap">
   {
     "imports": {
@@ -37,7 +46,7 @@
     <div id="scene-container" aria-label="Three.js canvas host"></div>
     <aside id="ui">
       <div class="brand">
-        <b>Self‑Folding Decahedron</b> — welded hinges · one‑parameter fold<br/>
+        <b>Self‑Folding Decahedron</b> — sequential; welded hinges<br/>
         Iridescence + mixed interference bands
       </div>
       <!-- lil‑gui mounts here -->
