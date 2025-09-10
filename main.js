@@ -359,7 +359,15 @@ class RigidHingeMesh {
   }
 
   update(t, speed = 1.0) {
-    const q = (f, p) => Math.sin(2 * Math.PI * (f * speed) * t + p);
+    // unified driver for "self-fold" mode
+    const ease = (x) => x*x*(3 - 2*x); // smoothstep
+    const q01 = 0.5 + 0.5 * Math.sin(2 * Math.PI * (0.10 * speed) * t); // base 0..1
+    const s   = ease(q01);
+    const aMin = THREE.MathUtils.degToRad(params.foldMinDeg);
+    const aMax = THREE.MathUtils.degToRad(params.foldMaxDeg);
+    const alpha = THREE.MathUtils.lerp(aMin, aMax, s);   // top hinges
+    const beta  = -alpha;                                 // bottom hinges (mirror)
+    const q = (f, p) => Math.sin(2 * Math.PI * (f * speed) * t + p); // fallback for "free" mode
 
     // Root faces (no parent)
     for (let i = 0; i < this._M.length; i++) this._M[i].identity();
@@ -372,7 +380,18 @@ class RigidHingeMesh {
 
       const h = f.hinge;
       const Mparent = this._M[h.parent];
-      const angle = h.amp * q(h.freq, h.phase) + 0.10 * Math.sin(2 * Math.PI * (0.05 * speed) * t + id);
+
+      let angle;
+      if (params.foldMode === 'self-fold') {
+        // group-aware coordinated angles; hinges declare .group = 'top' | 'bottom' | (optional) 'eq'
+        // if group missing, treat as top
+        const g = h.group || 'top';
+        angle = (g === 'bottom') ? beta : alpha;
+      } else {
+        // original multi-DOF (free) behavior
+        angle = h.amp * q(h.freq, h.phase) + 0.10 * Math.sin(2 * Math.PI * (0.05 * speed) * t + id);
+      }
+
       this._composePinned(Mparent, this.faces[h.parent], h, angle, this._M[id]);
     }
 
@@ -471,15 +490,18 @@ function buildPentagonalDipyramidSpec() {
       child: i, parent: i-1,
       parentEdge: [0,2], // in parent face (top, ring[i])
       childEdge:  [0,1],
+      group: 'top',
       ampDeg: 36 - i, freq: 0.10 + 0.02*i, phase: 0.6*i
     });
   }
   // Bottom chain starting at face 5 hinged to face 0 along edge [ring0, ring1] -> in top face [1,2], in bottom [1,2]
-  hinges.push({ child: 5, parent: 0, parentEdge: [1,2], childEdge: [1,2], ampDeg: 44, freq: 0.16, phase: 0.5 });
+  hinges.push({ child: 5, parent: 0, parentEdge: [1,2], childEdge: [1,2], group: 'bottom', ampDeg: 44, freq: 0.16, phase: 0.5 });
+
   for (let k = 6; k < 10; k++) {
     hinges.push({
       child: k, parent: k-1,
       parentEdge: [1,2], childEdge: [1,2],
+      group: 'bottom',
       ampDeg: 42 - (k-6), freq: 0.09 + 0.02*(k-6), phase: 0.85 + 0.75*(k-6)
     });
   }
@@ -523,16 +545,19 @@ function buildPentagonalTrapezohedronSpec() {
     hinges.push({
       child: i, parent: i-1,
       parentEdge: [0,3], childEdge: [0,1],
+      group: 'top',
       ampDeg: 34 - i, freq: 0.11 + 0.02*i, phase: 0.8*i
     });
   }
   // Lower chain starts at face 5 hinged to face 0 along edge [Top0, Bot0] which is [1,2] in both
-  hinges.push({ child: 5, parent: 0, parentEdge: [1,2], childEdge: [1,2], ampDeg: 40, freq: 0.15, phase: 0.5 });
+  hinges.push({ child: 5, parent: 0, parentEdge: [1,2], childEdge: [1,2], group: 'bottom', ampDeg: 40, freq: 0.15, phase: 0.5 });
+
   for (let k = 6; k < 10; k++) {
     hinges.push({
       child: k, parent: k-1,
-      parentEdge: [0,3], // share edge [S, Bot[k-5]] with previous lower face
+      parentEdge: [0,3],
       childEdge:  [0,1],
+      group: 'bottom',
       ampDeg: 38 - (k-6), freq: 0.10 + 0.02*(k-6), phase: 1.1 + 0.7*(k-6)
     });
   }
@@ -615,6 +640,9 @@ const params = {
   objectType: 'dipyramid', // 'dipyramid' | 'trapezohedron'
   play: true,
   foldSpeed: 1.0,
+  foldMode: 'self-fold',   // 'self-fold' | 'free'
+  foldMinDeg: 8.0,         // alpha_min
+  foldMaxDeg: 65.0,        // alpha_max
 
   // Glow (bloom)
   bloomStrength: 0.0, // default 0
@@ -642,6 +670,10 @@ fShape.add(params, 'objectType', {
   'Pentagonal Dipyramid (10 triangles)': 'dipyramid',
   'Pentagonal Trapezohedron (10 kites)': 'trapezohedron'
 }).name('Object Type').onChange(v => switchShape(v));
+
+fShape.add(params, 'foldMode', { 'Self-fold (1‑DOF)': 'self-fold', 'Free (multi‑DOF)': 'free' }).name('Fold Mode');
+fShape.add(params, 'foldMinDeg', 0, 89, 0.1).name('Fold Min (°)');
+fShape.add(params, 'foldMaxDeg', 1, 89, 0.1).name('Fold Max (°)');
 
 const fAnim = gui.addFolder('Animation');
 fAnim.add(params, 'play').name('Play / Pause');
