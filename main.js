@@ -1,17 +1,13 @@
-// Endless Folding Polyhedra — Dodecahedron-first
-// Full replacement for prior script. Starts on a regular dodecahedron (12 pentagons),
-// and keeps the origami-like, rigid-hinge animation system.
-// Provenance (user uploads): HTML shell :contentReference[oaicite:2]{index=2} • Original code baseline :contentReference[oaicite:3]{index=3}
+// Endless Folding Polyhedra — Dodecahedron-first (Origami-style)
+// Full replacement for your prior main.js. Baseline provenance: :contentReference[oaicite:1]{index=1}
 //
-// Key changes:
-//   • Added buildDodecahedronSpec() which reconstructs pentagonal faces + hinges from THREE.DodecahedronGeometry.
-//   • Shape selector now includes "Dodecahedron (12 pentagons)" and defaults to it.
-//   • Hinge tree is built via a BFS spanning tree over face adjacency, with alternating hinge groups for symmetric folding.
+// Fixes the crash you hit:
+//   • Robust dodecahedron builder that works with BOTH indexed and non-indexed BufferGeometry.
+//   • Global vertex welding by quantized position → correct face adjacency even without shared indices.
 //
-// Notes:
-//   • Faces are rigid and planar; edges are welded (pinned) — evoking paper origami creases.
-//   • In "Self-fold" mode, all hinges move in one DOF with mirrored top/bottom groups.
-//   • In "Free" mode, each hinge has its own amplitude/frequency/phase for playful motion.
+// Origami feel:
+//   • Faces are rigid; hinges are pinned along shared edges; edges are welded every frame.
+//   • Coordinated “self-fold” (1‑DOF) mode mirrors top/bottom hinge groups; also has “free” mode.
 
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
@@ -55,7 +51,7 @@ const pmrem = new THREE.PMREMGenerator(renderer);
 const envRT = pmrem.fromScene(new RoomEnvironment(), 0.04);
 scene.environment = envRT.texture;
 
-// ---------- Generic Rigid Hinge Mesh (supports arbitrary polygonal faces) ----------
+// ---------- Generic Rigid Hinge Mesh ----------
 class RigidHingeMesh {
   /**
    * @param {Object} spec
@@ -66,7 +62,6 @@ class RigidHingeMesh {
   constructor(spec) {
     this.group = new THREE.Group();
 
-    // Deep copy face data
     this.faces = spec.faces.map((f, id) => ({
       id,
       tag: f.tag || '',
@@ -76,7 +71,7 @@ class RigidHingeMesh {
       hinge: null
     }));
 
-    // Triangulate each face (fan) and map geometry vertices -> (face, local index)
+    // Triangulate each face with a fan; record mapping geoVertex -> (face, local-index)
     this._geomMap = [];
     const tris = [];
     for (let fi = 0; fi < this.faces.length; fi++) {
@@ -89,7 +84,7 @@ class RigidHingeMesh {
       }
     }
 
-    // Create geometry
+    // Geometry
     const triCount = tris.length;
     const positions = new Float32Array(triCount * 3 * 3);
     const normals   = new Float32Array(triCount * 3 * 3);
@@ -131,7 +126,7 @@ class RigidHingeMesh {
     const hinges = spec.hinges || [];
     for (const h of hinges) this._bindHinge(h);
 
-    // Order (parent before child)
+    // Parent-before-child traversal
     this.faceOrder = this._topoOrder();
 
     this.update(0, 1.0);
@@ -453,117 +448,153 @@ class RigidHingeMesh {
   }
 }
 
-// ---------- Dodecahedron builder (12 pentagons) ----------
+// ---------- Dodecahedron builder (indexed & non-indexed safe) ----------
 function buildDodecahedronSpec() {
-  // Source geometry (detail 0). We'll reconstruct pentagon faces from its triangles.
+  // Base geometry: triangles (from PolyhedronGeometry). We will cluster triangles into 12 pentagons.
   const g = new THREE.DodecahedronGeometry(1.0, 0);
 
   const posAttr = g.getAttribute('position');
+  if (!posAttr) throw new Error('DodecahedronGeometry has no position attribute.');
+  const posArr = posAttr.array;
+  const getV = (i) => new THREE.Vector3(posArr[i*3], posArr[i*3+1], posArr[i*3+2]);
+
+  // If non-indexed, synthesize a sequential index [0..count-1]
   const idxAttr = g.getIndex();
-  const positions = [];
+  const indices = idxAttr ? Array.from(idxAttr.array) : Array.from({ length: posAttr.count }, (_, i) => i);
+
+  // Global vertex welding by quantized world position (handles non-indexed duplicates)
+  const qn = (x, q=1e5) => Math.round(x * q) / q;
+  const weldMap = new Map();  // key -> welded index
+  const weldPos = [];         // welded index -> Vector3
+  const vertexToWeld = new Array(posAttr.count);
   for (let i = 0; i < posAttr.count; i++) {
-    positions.push(new THREE.Vector3().fromArray(posAttr.array, i * 3));
+    const v = getV(i);
+    const key = `${qn(v.x)},${qn(v.y)},${qn(v.z)}`;
+    let wi = weldMap.get(key);
+    if (wi === undefined) {
+      wi = weldPos.length;
+      weldMap.set(key, wi);
+      weldPos.push(v.clone());
+    }
+    vertexToWeld[i] = wi;
   }
-  const indices = Array.from(idxAttr.array);
 
-  const quant = (x, q = 1e4) => Math.round(x * q) / q;
+  // Group triangles by plane (normal + d), with canonical outward orientation
+  const clusters = new Map(); // key -> { normal, tris: [[i0,i1,i2],...], welds:Set(), verts:Set() }
+  const planeKey = (n, d) => `${qn(n.x)},${qn(n.y)},${qn(n.z)}|${qn(d)}`;
 
-  // Group triangles by (plane normal, plane constant) to get 12 planar clusters
-  const clusters = new Map();
   for (let t = 0; t < indices.length; t += 3) {
     const i0 = indices[t], i1 = indices[t+1], i2 = indices[t+2];
-    const p0 = positions[i0], p1 = positions[i1], p2 = positions[i2];
+    const p0 = getV(i0), p1 = getV(i1), p2 = getV(i2);
 
-    const n = new THREE.Vector3().subVectors(p1, p0).cross(new THREE.Vector3().subVectors(p2, p0)).normalize();
+    const n = new THREE.Vector3().subVectors(p1, p0).cross(new THREE.Vector3().subVectors(p2, p0));
+    const area2 = n.length();
+    if (area2 === 0) continue;
+    n.normalize();
+
+    // Canonical outward orientation: flip so that normal points roughly away from origin
+    const triC = new THREE.Vector3().addVectors(p0, p1).add(p2).multiplyScalar(1/3);
+    if (n.dot(triC) < 0) n.multiplyScalar(-1);
+
     const d = -n.dot(p0);
+    const key = planeKey(n, d);
 
-    const key = `${quant(n.x)},${quant(n.y)},${quant(n.z)}|${quant(d)}`;
-    if (!clusters.has(key)) clusters.set(key, { normal: n.clone(), tris: [], verts: new Set() });
+    if (!clusters.has(key)) clusters.set(key, { normal: n.clone(), tris: [], welds: new Set(), verts: new Set(), centroid: new THREE.Vector3() });
     const c = clusters.get(key);
     c.tris.push([i0, i1, i2]);
     c.verts.add(i0); c.verts.add(i1); c.verts.add(i2);
+    c.welds.add(vertexToWeld[i0]); c.welds.add(vertexToWeld[i1]); c.welds.add(vertexToWeld[i2]);
+    c.centroid.add(triC);
   }
 
-  // Build faces as ordered CCW pentagons
+  // Build 12 pentagonal faces (ordered CCW)
   const faces = [];
-  const faceIndices = []; // local->global vertex index map per face
+  const faceWeldIdx = []; // per-face welded indices in CCW order
   const faceCenters = [];
-  const scale = 1.15; // make it nicely visible
+  const scale = 1.15;
 
   for (const c of clusters.values()) {
-    const uniq = Array.from(c.verts);
-    if (uniq.length !== 5) continue; // safety; for dodecahedron all should be 5
+    const uniqWeld = Array.from(c.welds);
+    if (uniqWeld.length !== 5) continue; // only accept pentagonal planes
 
-    // Order the 5 vertices CCW in the plane
-    // Basis on the plane
+    // Order the 5 welded vertices CCW in the plane
     const n = c.normal.clone().normalize();
-    const centroid = uniq.reduce((acc, i) => acc.add(positions[i]), new THREE.Vector3()).multiplyScalar(1 / uniq.length);
+    const centroid = uniqWeld
+      .map(wi => weldPos[wi])
+      .reduce((acc, v) => acc.add(v), new THREE.Vector3())
+      .multiplyScalar(1 / uniqWeld.length);
+
     const ref = (Math.abs(n.y) < 0.99) ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(1, 0, 0);
     const u = new THREE.Vector3().crossVectors(ref, n).normalize();
     const v = new THREE.Vector3().crossVectors(n, u);
 
-    const ordered = uniq.map((idx) => {
-      const p = positions[idx];
-      const r = p.clone().sub(centroid);
-      const ang = Math.atan2(r.dot(v), r.dot(u));
-      return { idx, ang };
-    }).sort((a, b) => a.ang - b.ang).map(o => o.idx);
+    const orderedWeld = uniqWeld
+      .map((wi) => {
+        const p = weldPos[wi];
+        const r = p.clone().sub(centroid);
+        const ang = Math.atan2(r.dot(v), r.dot(u));
+        return { wi, ang };
+      })
+      .sort((a, b) => a.ang - b.ang)
+      .map(o => o.wi);
 
-    const faceVerts = ordered.map(i => positions[i].clone().multiplyScalar(scale));
+    const faceVerts = orderedWeld.map(wi => weldPos[wi].clone().multiplyScalar(scale));
     faces.push({ rest: faceVerts, tag: 'D' });
-    faceIndices.push(ordered);
+    faceWeldIdx.push(orderedWeld);
     faceCenters.push(centroid.clone().multiplyScalar(scale));
   }
 
-  // Adjacency via shared edges (two faces per edge)
-  const edgeMap = new Map(); // key: "min|max" -> [{face, local:[i,i+1], glob:[a,b]}...]
-  for (let f = 0; f < faceIndices.length; f++) {
-    const order = faceIndices[f];
+  // Build adjacency via shared welded edges
+  const edgeMap = new Map(); // "min|max" -> [{face, local:[i,i+1], weld:[a,b]}...]
+  for (let f = 0; f < faceWeldIdx.length; f++) {
+    const order = faceWeldIdx[f];
     const m = order.length;
     for (let k = 0; k < m; k++) {
       const a = order[k], b = order[(k + 1) % m];
       const key = (a < b) ? `${a}|${b}` : `${b}|${a}`;
       if (!edgeMap.has(key)) edgeMap.set(key, []);
-      edgeMap.get(key).push({ face: f, local: [k, (k + 1) % m], glob: [a, b] });
+      edgeMap.get(key).push({ face: f, local: [k, (k + 1) % m], weld: [a, b] });
     }
   }
 
-  // Build neighbor lists
+  // Neighbor lists
   const neighbors = Array.from({ length: faces.length }, () => []);
-  for (const [_, list] of edgeMap) {
+  for (const list of edgeMap.values()) {
     if (list.length === 2) {
       const A = list[0], B = list[1];
-      neighbors[A.face].push({ other: B.face, parentEdge: A.local, childLocal: B.local, gParent: A.glob, gChild: B.glob });
-      neighbors[B.face].push({ other: A.face, parentEdge: B.local, childLocal: A.local, gParent: B.glob, gChild: A.glob });
+      neighbors[A.face].push({ other: B.face, parentEdge: A.local, childLocal: B.local, wParent: A.weld, wChild: B.weld });
+      neighbors[B.face].push({ other: A.face, parentEdge: B.local, childLocal: A.local, wParent: B.weld, wChild: A.weld });
     }
   }
 
-  // Choose a root: the face with the highest center.y
+  // Root: face with highest center.y
   let root = 0, maxY = -Infinity;
   for (let i = 0; i < faceCenters.length; i++) {
     const y = faceCenters[i].y;
     if (y > maxY) { maxY = y; root = i; }
   }
 
-  // BFS spanning tree to create hinges (avoid cycles)
+  // BFS spanning tree → hinges
   const visited = new Array(faces.length).fill(false);
   const depth   = new Array(faces.length).fill(0);
   const hinges = [];
 
-  const q = [root];
-  visited[root] = true; depth[root] = 0;
+  const queue = [root];
+  visited[root] = true;
+  depth[root] = 0;
 
-  while (q.length) {
-    const parent = q.shift();
+  while (queue.length) {
+    const parent = queue.shift();
     for (const link of neighbors[parent]) {
       const child = link.other;
       if (visited[child]) continue;
 
-      // Make child's local edge orientation match parent's global edge order
-      const [ga, gb] = link.gParent;
-      const [gc, gd] = link.gChild;
-      const childEdge = (gc === ga && gd === gb) ? [link.childLocal[0], link.childLocal[1]]
-                                                 : [link.childLocal[1], link.childLocal[0]];
+      // Orient child's edge to match parent's welded order
+      const [pa, pb] = link.wParent;
+      const [ca, cb] = link.wChild;
+      const childEdge = (ca === pa && cb === pb)
+        ? [link.childLocal[0], link.childLocal[1]]
+        : [link.childLocal[1], link.childLocal[0]];
 
       const group = (depth[parent] % 2 === 0) ? 'top' : 'bottom';
       hinges.push({
@@ -572,21 +603,21 @@ function buildDodecahedronSpec() {
         parentEdge: [link.parentEdge[0], link.parentEdge[1]],
         childEdge,
         group,
-        ampDeg: 40,                 // used in "Free" mode
+        ampDeg: 40,
         freq: 0.12 + 0.02 * (child % 3),
         phase: 0.5 * (1 + (child % 5))
       });
 
       visited[child] = true;
       depth[child] = depth[parent] + 1;
-      q.push(child);
+      queue.push(child);
     }
   }
 
   return { faces, hinges };
 }
 
-// ---------- Other Shape builders (kept for comparison / selection) ----------
+// ---------- Other Shape builders (optional for selector) ----------
 function buildPentagonalDipyramidSpec() {
   const R = 1.05, H = 1.10, jitter = 0.025;
   const top = new THREE.Vector3(0,  H, 0);
@@ -660,8 +691,8 @@ let shape = null;
 
 function makeShape(kind) {
   const spec = (kind === 'trapezohedron') ? buildPentagonalTrapezohedronSpec()
-              : (kind === 'dipyramid')    ? buildPentagonalDipyramidSpec()
-              :                              buildDodecahedronSpec(); // default
+            : (kind === 'dipyramid')      ? buildPentagonalDipyramidSpec()
+            :                                buildDodecahedronSpec(); // default
   const inst = new RigidHingeMesh(spec);
   return inst;
 }
@@ -725,12 +756,12 @@ const gui = new GUI({ title: 'Controls', width: 320 });
 uiHost.appendChild(gui.domElement);
 
 const params = {
-  objectType: 'dodecahedron', // default (NEW): 'dodecahedron' | 'dipyramid' | 'trapezohedron'
+  objectType: 'dodecahedron', // default: dodecahedron
   play: true,
   foldSpeed: 1.0,
   foldMode: 'self-fold',   // 'self-fold' | 'free'
-  foldMinDeg: 0.0,         // start from flat-ish
-  foldMaxDeg: 55.0,        // < 63.4349° (π - dihedral) to keep paper-like motion
+  foldMinDeg: 0.0,         // start flatter
+  foldMaxDeg: 55.0,        // keep under ~90 to feel like paper
 
   // Glow (bloom)
   bloomStrength: 0.0,
