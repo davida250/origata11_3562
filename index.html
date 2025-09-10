@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Folding Iridescent Polyhedron — Three.js</title>
+  <title>Folding Birefringent Polyhedron — Three.js</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
     html, body { height: 100%; margin: 0; background: #000; color: #ddd; font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }
@@ -14,16 +14,15 @@
       width: 100%;
     }
     #viewport { position: relative; overflow: hidden; }
-    #ui { background: rgba(12,12,12,0.96); border-left: 1px solid #1a1a1a; padding: 10px 8px; overflow-y: auto; }
+    #ui { background: rgba(12,12,12,0.96); border-left: 1px solid #1a1a1a; padding: 10px 10px; overflow-y: auto; }
     .note {
       position: absolute; left: 12px; bottom: 12px; color: #9aa; opacity: 0.9;
-      font-size: 12px; line-height: 1.3; pointer-events: none;
-      text-shadow: 0 1px 0 rgba(0,0,0,0.6);
+      font-size: 12px; line-height: 1.35; pointer-events: none; text-shadow: 0 1px 0 rgba(0,0,0,0.6);
     }
     canvas { display: block; }
   </style>
 
-  <!-- Import maps for Three.js + examples + lil-gui -->
+  <!-- Import maps -->
   <script type="importmap">
     {
       "imports": {
@@ -38,8 +37,8 @@
   <div class="layout">
     <div id="viewport">
       <div class="note">
-        Drag to orbit · Wheel to zoom · Pause/Play: <b>space</b><br/>
-        The single shape folds over time; textures emulate thin‑film + diffractive stripes.
+        Drag to orbit · Wheel to zoom · <b>Space</b> = Pause/Play<br/>
+        Goal: one shape that folds on edge hinges and shows iridescent, striped interference like the contact sheet.
       </div>
     </div>
     <div id="ui"></div>
