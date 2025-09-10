@@ -1,122 +1,99 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+import * as BufferGeometryUtils from 'three/addons/utils/BufferGeometryUtils.js';
 import GUI from 'lil-gui';
 
-// Ensure DOM is ready before touching elements / sizes
-if (document.readyState === 'loading') {
-  window.addEventListener('DOMContentLoaded', start);
-} else {
-  start();
-}
+// Boot after DOM is ready
+if (document.readyState === 'loading') window.addEventListener('DOMContentLoaded', boot);
+else boot();
 
-function start() {
-  /* ------------------------------------------------------------------------ */
-  /* Mount points and canvas                                                   */
-  /* ------------------------------------------------------------------------ */
+function boot() {
+  // Mounts
   const container = document.getElementById('viewport');
-  if (!container) {
-    console.error('#viewport not found.');
-    return;
-  }
-
-  // Create an explicit canvas so we fully control context creation
   const canvas = document.createElement('canvas');
   canvas.id = 'three-canvas';
-  canvas.style.display = 'block';
   container.appendChild(canvas);
 
-  // Try WebGL2 → WebGL1 → experimental-webgl
-  const glAttribs = { antialias: true, alpha: false, premultipliedAlpha: false, preserveDrawingBuffer: false, powerPreference: 'high-performance' };
-  const gl =
-    canvas.getContext('webgl2', glAttribs) ||
-    canvas.getContext('webgl', glAttribs) ||
-    canvas.getContext('experimental-webgl', glAttribs);
+  // GL context (WebGL2 → WebGL1)
+  const glAttribs = { antialias: true, alpha: false, premultipliedAlpha: false, powerPreference: 'high-performance' };
+  const gl = canvas.getContext('webgl2', glAttribs) || canvas.getContext('webgl', glAttribs);
+  if (!gl) { alert('WebGL not available'); return; }
 
-  if (!gl) {
-    showErrorOverlay('WebGL is not available on this device/browser. Please enable hardware acceleration and try a modern browser.');
-    return;
-  }
-
-  /* ------------------------------------------------------------------------ */
-  /* Renderer / Scene / Camera                                                */
-  /* ------------------------------------------------------------------------ */
+  // Renderer / scene / camera
   const renderer = new THREE.WebGLRenderer({ canvas, context: gl });
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
   renderer.setSize(container.clientWidth, container.clientHeight);
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
-  renderer.toneMappingExposure = 1.0;
+  renderer.toneMappingExposure = 1.1;
 
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(0x000000);
 
-  const camera = new THREE.PerspectiveCamera(
-    45,
-    container.clientWidth / container.clientHeight,
-    0.1,
-    100
-  );
-  camera.position.set(3.5, 2.2, 4.5);
+  const camera = new THREE.PerspectiveCamera(45, container.clientWidth / container.clientHeight, 0.1, 100);
+  camera.position.set(3.6, 2.2, 4.8);
 
   const controls = new OrbitControls(camera, renderer.domElement);
   controls.enableDamping = true;
   controls.dampingFactor = 0.06;
 
-  /* ------------------------------------------------------------------------ */
-  /* Environment (PMREM + RoomEnvironment)                                    */
-  /* ------------------------------------------------------------------------ */
+  // PMREM + RoomEnvironment for PBR reflections (recommended for PhysicalMaterial). :contentReference[oaicite:2]{index=2}
   const pmrem = new THREE.PMREMGenerator(renderer);
-  const envScene = new RoomEnvironment();
-  const envMap = pmrem.fromScene(envScene).texture;
+  const envMap = pmrem.fromScene(new RoomEnvironment()).texture;
   scene.environment = envMap;
 
-  /* ------------------------------------------------------------------------ */
-  /* Parameters (GUI)                                                         */
-  /* ------------------------------------------------------------------------ */
+  // =========================
+  // Parameters & GUI
+  // =========================
   const params = {
-    // Animation / folding
+    // Folding
     play: true,
-    speed: 0.26,
-    maxAngleDeg: 82.0,
-    stagger: 0.55,
-    autoRotate: true,
+    speed: 0.38,
+    maxAngleDeg: 88,    // large to really "fold"
+    stagger: 0.55,      // phase offset between hinges
+    autoRotate: false,  // keep off so folds are obvious
 
-    // Material / texture feel
+    // Material & texture
     iridescence: 1.0,
-    iriIOR: 1.3,
-    iriMinNm: 120.0,
-    iriMaxNm: 650.0,
-    transmission: 0.06,
-    thickness: 0.55,
-    roughness: 0.08,
+    iriIOR: 1.35,
+    iriMinNm: 120,
+    iriMaxNm: 950,
+    transmission: 0.04,
+    thickness: 0.65,
+    roughness: 0.12,
     clearcoat: 1.0,
     clearcoatRoughness: 0.22,
     envIntensity: 1.25,
 
-    // Diffractive stripe overlay
-    stripeScale: 22.0,
-    stripeStrength: 0.55,
+    // Diffractive band overlay
+    stripeScale: 28.0,
+    stripeStrength: 0.95,
+    stripeSharpness: 8.0,
     rainbowShift: 0.0,
-    stripeMix: 0.5
+    stripeMix: 0.55,
+    edgeGlow: 1.2
   };
 
-  /* ------------------------------------------------------------------------ */
-  /* Geometry                                                                 */
-  /* ------------------------------------------------------------------------ */
-  const baseRadius = 1.35;
-  const geo = new THREE.OctahedronGeometry(baseRadius, 0);
+  // =========================
+  // Geometry (indexed!) + base copy
+  // =========================
+  // Start from an octahedron (8 faces), then MERGE vertices to make it indexed so
+  // adjacent faces really share hinge edges → cohesive folding (no cracks). :contentReference[oaicite:3]{index=3}
+  let geo = new THREE.OctahedronGeometry(1.35, 0);
+  geo = BufferGeometryUtils.mergeVertices(geo, 1e-5);
   geo.computeVertexNormals();
-  const basePositions = geo.attributes.position.array.slice();
 
-  /* ------------------------------------------------------------------------ */
-  /* Material: iridescent physical + diffractive stripes via onBeforeCompile  */
-  /* ------------------------------------------------------------------------ */
+  const basePositions = geo.attributes.position.array.slice(); // immutable baseline
+
+  // =========================
+  // Material: Physical + custom diffraction overlay
+  // =========================
   const material = new THREE.MeshPhysicalMaterial({
     color: 0xffffff,
     side: THREE.DoubleSide,
-    flatShading: true,
-    metalness: 0.1,
+    flatShading: true,                       // crisp facets
+    metalness: 0.08,
     roughness: params.roughness,
     clearcoat: params.clearcoat,
     clearcoatRoughness: params.clearcoatRoughness,
@@ -125,18 +102,21 @@ function start() {
     transmission: params.transmission,
     thickness: params.thickness,
     attenuationColor: new THREE.Color(0xffffff),
-    attenuationDistance: 1.2,
-    iridescence: params.iridescence,
+    attenuationDistance: 1.5,
+    iridescence: params.iridescence,         // thin‑film iridescence in MeshPhysicalMaterial (docs). :contentReference[oaicite:4]{index=4}
     iridescenceIOR: params.iriIOR,
     iridescenceThicknessRange: [params.iriMinNm, params.iriMaxNm]
   });
 
+  // Overlay approximate diffraction grating + edge Fresnel accent; injected via onBeforeCompile (supported pattern). :contentReference[oaicite:5]{index=5}
   material.onBeforeCompile = (shader) => {
     shader.uniforms.uTime = { value: 0.0 };
     shader.uniforms.uStripeScale = { value: params.stripeScale };
     shader.uniforms.uStripeStrength = { value: params.stripeStrength };
+    shader.uniforms.uStripeSharpness = { value: params.stripeSharpness };
     shader.uniforms.uRainbowShift = { value: params.rainbowShift };
     shader.uniforms.uStripeMix = { value: params.stripeMix };
+    shader.uniforms.uEdgeGlow = { value: params.edgeGlow };
 
     shader.vertexShader = `
       varying vec3 vWorldPos;
@@ -155,11 +135,14 @@ function start() {
       uniform float uTime;
       uniform float uStripeScale;
       uniform float uStripeStrength;
+      uniform float uStripeSharpness;
       uniform float uRainbowShift;
       uniform float uStripeMix;
+      uniform float uEdgeGlow;
       varying vec3 vWorldPos;
       varying vec3 vWorldNormal;
 
+      // GPU Gems-style spectral ramp (approx). :contentReference[oaicite:6]{index=6}
       vec3 spectral(float x){
         x = clamp(fract(x), 0.0, 1.0);
         return clamp(vec3(
@@ -176,12 +159,23 @@ function start() {
         vec3 T = normalize(cross(N, helper));
         vec3 B = normalize(cross(N, T));
 
-        float s1 = 0.5 + 0.5 * sin( dot(vWorldPos, T) * uStripeScale + uRainbowShift + uTime*0.6 );
-        float s2 = 0.5 + 0.5 * sin( dot(vWorldPos, B) * (uStripeScale * 0.63) - (uRainbowShift*1.37) + uTime*0.37 );
+        // Two planar "grating" band sets with different frequencies -> moiré-like rainbow.
+        float a = dot(vWorldPos, T) * uStripeScale + uRainbowShift + uTime*0.45;
+        float b = dot(vWorldPos, B) * (uStripeScale * 0.67) - (uRainbowShift*1.37) + uTime*0.31;
+
+        // Sharper stripes using smoothstep around sin (controls contrast)
+        float s1 = smoothstep(0.5 - 0.5/pow(uStripeSharpness,0.5), 0.5 + 0.5/pow(uStripeSharpness,0.5), 0.5 + 0.5 * sin(a));
+        float s2 = smoothstep(0.5 - 0.5/pow(uStripeSharpness,0.5), 0.5 + 0.5/pow(uStripeSharpness,0.5), 0.5 + 0.5 * sin(b));
         float bands = mix(s1, s2, uStripeMix);
+
         vec3 rainbow = spectral(bands);
 
+        // Slight Fresnel rim to mimic the bright edges seen in the contact sheet
+        vec3 V = normalize(cameraPosition - vWorldPos);
+        float fres = pow(1.0 - max(dot(normalize(N), V), 0.0), 3.0);
+
         diffuseColor.rgb = mix(diffuseColor.rgb, diffuseColor.rgb + rainbow, uStripeStrength);
+        diffuseColor.rgb += fres * uEdgeGlow * 0.12;
       `);
 
     material.userData.shader = shader;
@@ -190,67 +184,71 @@ function start() {
   const mesh = new THREE.Mesh(geo, material);
   scene.add(mesh);
 
-  /* ------------------------------------------------------------------------ */
-  /* Hinged folds along octahedron edges                                      */
-  /* ------------------------------------------------------------------------ */
-  function uniqueVertsFromGeometry(g) {
-    const pos = g.attributes.position.array;
-    const map = new Map();
-    const verts = [];
-    for (let i = 0; i < pos.length; i += 3) {
-      const x = +pos[i].toFixed(5), y = +pos[i + 1].toFixed(5), z = +pos[i + 2].toFixed(5);
-      const key = `${x},${y},${z}`;
-      if (!map.has(key)) {
-        map.set(key, verts.length);
-        verts.push(new THREE.Vector3(x, y, z));
-      }
-    }
-    return verts;
-  }
-  const uniq = uniqueVertsFromGeometry(geo);
+  // =========================
+  // Build hinges + precompute affected vertex sets
+  // =========================
+  // Unique vertex positions (from indexed geometry)
+  const verts = [];
+  const pos = geo.attributes.position.array;
+  for (let i = 0; i < pos.length; i += 3) verts.push(new THREE.Vector3(pos[i], pos[i+1], pos[i+2]));
 
-  let top = uniq[0], bottom = uniq[0];
-  for (const v of uniq) {
-    if (v.y > top.y) top = v;
-    if (v.y < bottom.y) bottom = v;
-  }
-  const equator = uniq.filter(v => v !== top && v !== bottom)
-    .sort((a, b) => Math.atan2(a.z, a.x) - Math.atan2(b.z, b.x));
+  // Find top/bottom and sort equator by angle
+  let top = verts[0], bottom = verts[0];
+  for (const v of verts) { if (v.y > top.y) top = v; if (v.y < bottom.y) bottom = v; }
+  const equator = verts.filter(v => v !== top && v !== bottom)
+                       .sort((a,b) => Math.atan2(a.z, a.x) - Math.atan2(b.z, b.x));
 
+  // Hinge helper
   const hinges = [];
+  const centroid = new THREE.Vector3(0,0,0);
+  for (const v of verts) centroid.add(v); centroid.multiplyScalar(1/verts.length);
+
+  function addHinge(p0, p1, phase, sign) {
+    const origin = p0.clone();
+    const axis = p1.clone().sub(p0).normalize();         // edge direction
+    // Plane containing the axis and roughly facing away from the centroid:
+    // n = cross(axis, (origin - centroid))  → guarantees axis lies in plane. 
+    const planeN = new THREE.Vector3().crossVectors(axis, origin.clone().sub(centroid)).normalize();
+
+    // Precompute which vertex indices belong to the "folding" side of this hinge
+    const affected = [];
+    const axisPoint = origin.clone();
+    const axisDir = axis.clone();
+    const AXIS_EPS = 1e-5;
+
+    // Utility: distance from point to the hinge line
+    const tmp = new THREE.Vector3(), w = new THREE.Vector3();
+    function distToAxis(p) {
+      w.copy(p).sub(axisPoint);
+      const projLen = w.dot(axisDir);
+      tmp.copy(axisDir).multiplyScalar(projLen);
+      return w.sub(tmp).length();
+    }
+
+    for (let i = 0; i < verts.length; i++) {
+      const p = verts[i];
+      // If the vertex lies on the axis, we don't assign it (it stays fixed → true hinge).
+      if (distToAxis(p) < AXIS_EPS) continue;
+      const side = p.clone().sub(origin).dot(planeN);
+      if (side > 0) affected.push(i);
+    }
+
+    hinges.push({ origin, axis, planeN, affected, phase, sign });
+  }
+
+  // Create 8 hinges (top↔equator[i], bottom↔equator[i]), time‑staggered to create delayed folding.
   for (let i = 0; i < 4; i++) {
     const E = equator[i];
     const Enext = equator[(i + 1) % 4];
 
-    const axisTop = E.clone().sub(top).normalize();
-    const faceNTop = new THREE.Vector3().crossVectors(
-      E.clone().sub(top),
-      Enext.clone().sub(top)
-    ).normalize();
-    const planeNTop = new THREE.Vector3().crossVectors(axisTop, faceNTop).normalize();
-    hinges.push({
-      origin: top.clone(),
-      axis: axisTop.clone(),
-      planeN: planeNTop.clone(),
-      phase: i * params.stagger,
-      sign: 1.0
-    });
+    addHinge(top, E, i * params.stagger, +1.0);
+    addHinge(bottom, E, (i + 0.5) * params.stagger, -1.0);
 
-    const axisBot = E.clone().sub(bottom).normalize();
-    const faceNBot = new THREE.Vector3().crossVectors(
-      Enext.clone().sub(bottom),
-      E.clone().sub(bottom)
-    ).normalize();
-    const planeNBot = new THREE.Vector3().crossVectors(axisBot, faceNBot).normalize();
-    hinges.push({
-      origin: bottom.clone(),
-      axis: axisBot.clone(),
-      planeN: planeNBot.clone(),
-      phase: (i + 0.5) * params.stagger,
-      sign: -1.0
-    });
+    // Optional: add a couple of diagonals for richer silhouettes at some times
+    addHinge(E, Enext, (i + 0.25) * params.stagger, (i % 2 === 0) ? 1.0 : -1.0);
   }
 
+  // Rotate a point around an axis line (Rodrigues formula).
   const _a = new THREE.Vector3(), _r = new THREE.Vector3(), _p = new THREE.Vector3();
   function rotateAroundAxisLine(point, origin, axis, angle) {
     _p.copy(point).sub(origin);
@@ -262,121 +260,102 @@ function start() {
     return _r.add(origin);
   }
 
+  // Folding step (from immutable baseline → cohesive, no drift)
   const posAttr = geo.attributes.position;
-  const pos = posAttr.array;
-  const basePos = basePositions;
   const EPS = 1e-6;
 
   function applyFolds(t) {
     const maxAngle = THREE.MathUtils.degToRad(params.maxAngleDeg);
-    for (let i = 0; i < pos.length; i += 3) {
-      let vx = basePos[i], vy = basePos[i + 1], vz = basePos[i + 2];
-      _p.set(vx, vy, vz);
+    const count = posAttr.count; // number of vertices
+    for (let vi = 0; vi < count; vi++) {
+      // start from baseline
+      const i3 = vi * 3;
+      _p.set(basePositions[i3], basePositions[i3+1], basePositions[i3+2]);
 
       for (let h = 0; h < hinges.length; h++) {
         const H = hinges[h];
+        // vertex membership test is precomputed
+        if (!H.affectedSet) H.affectedSet = new Set(H.affected);
+        if (!H.affectedSet.has(vi)) continue;
+
+        // Triangular ping‑pong with smoothstep ease → “delayed” folding cadence
         const tt = (t * params.speed + H.phase);
-        const tri = Math.abs((tt % 2) - 1);          // ping-pong 0..1..0
-        const eased = tri * tri * (3 - 2 * tri);     // smoothstep
+        const tri = Math.abs((tt % 2) - 1);                 // 0..1..0
+        const eased = tri * tri * (3 - 2 * tri);            // smoothstep
         const angle = (eased - 0.5) * 2.0 * maxAngle * H.sign;
 
-        const side = (_p.clone().sub(H.origin)).dot(H.planeN);
-        if (side > EPS) {
-          _p.copy(rotateAroundAxisLine(_p, H.origin, H.axis, angle));
-        }
+        _p.copy(rotateAroundAxisLine(_p, H.origin, H.axis, angle));
       }
 
-      pos[i] = _p.x;
-      pos[i + 1] = _p.y;
-      pos[i + 2] = _p.z;
+      pos[i3] = _p.x; pos[i3+1] = _p.y; pos[i3+2] = _p.z;
     }
     posAttr.needsUpdate = true;
-    geo.computeVertexNormals();
+    geo.computeVertexNormals(); // recalc per-frame (flat shading will keep faceted look)
   }
 
-  /* ------------------------------------------------------------------------ */
-  /* GUI                                                                      */
-  /* ------------------------------------------------------------------------ */
+  // =========================
+  // GUI
+  // =========================
   const gui = new GUI({ container: document.getElementById('ui'), width: 280, title: 'Controls' });
   gui.add(params, 'play').name('Play/Pause');
   gui.add(params, 'autoRotate').name('Auto rotate');
-  gui.add(params, 'speed', 0.02, 1.2, 0.01).name('Fold speed');
+  gui.add(params, 'speed', 0.02, 1.5, 0.01).name('Fold speed');
   gui.add(params, 'maxAngleDeg', 5, 140, 1).name('Fold amplitude (°)');
   gui.add(params, 'stagger', 0.0, 1.5, 0.01).name('Time offset');
 
   const fMat = gui.addFolder('Material');
-  fMat.add(params, 'iridescence', 0.0, 1.0, 0.01).name('Iridescence').onChange(v => { material.iridescence = v; });
-  fMat.add(params, 'iriIOR', 1.0, 2.0, 0.01).name('Iridescence IOR').onChange(v => { material.iridescenceIOR = v; });
-  fMat.add(params, 'iriMinNm', 50, 500, 1).name('Iri min (nm)').onChange(() => { material.iridescenceThicknessRange = [params.iriMinNm, params.iriMaxNm]; });
-  fMat.add(params, 'iriMaxNm', 200, 1200, 1).name('Iri max (nm)').onChange(() => { material.iridescenceThicknessRange = [params.iriMinNm, params.iriMaxNm]; });
-  fMat.add(params, 'transmission', 0.0, 0.5, 0.01).name('Transmission').onChange(v => { material.transmission = v; });
-  fMat.add(params, 'thickness', 0.05, 2.0, 0.01).name('Thickness').onChange(v => { material.thickness = v; });
-  fMat.add(params, 'roughness', 0.0, 0.6, 0.001).name('Roughness').onChange(v => { material.roughness = v; });
-  fMat.add(params, 'clearcoat', 0.0, 1.0, 0.01).name('Clearcoat').onChange(v => { material.clearcoat = v; });
-  fMat.add(params, 'clearcoatRoughness', 0.0, 1.0, 0.01).name('ClearcoatRough').onChange(v => { material.clearcoatRoughness = v; });
-  fMat.add(params, 'envIntensity', 0.1, 3.0, 0.01).name('Env Intensity').onChange(v => { material.envMapIntensity = v; });
+  fMat.add(params, 'iridescence', 0.0, 1.0, 0.01).name('Iridescence').onChange(v => material.iridescence = v);
+  fMat.add(params, 'iriIOR', 1.0, 2.0, 0.01).name('Iri IOR').onChange(v => material.iridescenceIOR = v);
+  fMat.add(params, 'iriMinNm', 50, 500, 1).name('Iri min (nm)').onChange(() => material.iridescenceThicknessRange = [params.iriMinNm, params.iriMaxNm]);
+  fMat.add(params, 'iriMaxNm', 200, 1200, 1).name('Iri max (nm)').onChange(() => material.iridescenceThicknessRange = [params.iriMinNm, params.iriMaxNm]);
+  fMat.add(params, 'transmission', 0.0, 0.4, 0.01).name('Transmission').onChange(v => material.transmission = v);
+  fMat.add(params, 'thickness', 0.05, 2.0, 0.01).name('Thickness').onChange(v => material.thickness = v);
+  fMat.add(params, 'roughness', 0.0, 0.6, 0.001).name('Roughness').onChange(v => material.roughness = v);
+  fMat.add(params, 'clearcoat', 0.0, 1.0, 0.01).name('Clearcoat').onChange(v => material.clearcoat = v);
+  fMat.add(params, 'clearcoatRoughness', 0.0, 1.0, 0.01).name('ClearcoatRough').onChange(v => material.clearcoatRoughness = v);
+  fMat.add(params, 'envIntensity', 0.1, 3.0, 0.01).name('Env Intensity').onChange(v => material.envMapIntensity = v);
 
   const fTex = gui.addFolder('Diffractive stripes');
-  fTex.add(params, 'stripeScale', 2.0, 60.0, 0.1).name('Scale').onChange(v => { if (material.userData.shader) material.userData.shader.uniforms.uStripeScale.value = v; });
-  fTex.add(params, 'stripeStrength', 0.0, 1.0, 0.01).name('Strength').onChange(v => { if (material.userData.shader) material.userData.shader.uniforms.uStripeStrength.value = v; });
-  fTex.add(params, 'stripeMix', 0.0, 1.0, 0.01).name('Dual mix').onChange(v => { if (material.userData.shader) material.userData.shader.uniforms.uStripeMix.value = v; });
-  fTex.add(params, 'rainbowShift', -Math.PI, Math.PI, 0.01).name('Phase').onChange(v => { if (material.userData.shader) material.userData.shader.uniforms.uRainbowShift.value = v; });
+  fTex.add(params, 'stripeScale', 4.0, 60.0, 0.1).name('Scale').onChange(v => material.userData.shader && (material.userData.shader.uniforms.uStripeScale.value = v));
+  fTex.add(params, 'stripeStrength', 0.0, 1.0, 0.01).name('Strength').onChange(v => material.userData.shader && (material.userData.shader.uniforms.uStripeStrength.value = v));
+  fTex.add(params, 'stripeSharpness', 1.0, 20.0, 0.1).name('Sharpness').onChange(v => material.userData.shader && (material.userData.shader.uniforms.uStripeSharpness.value = v));
+  fTex.add(params, 'stripeMix', 0.0, 1.0, 0.01).name('Dual mix').onChange(v => material.userData.shader && (material.userData.shader.uniforms.uStripeMix.value = v));
+  fTex.add(params, 'rainbowShift', -Math.PI, Math.PI, 0.01).name('Phase').onChange(v => material.userData.shader && (material.userData.shader.uniforms.uRainbowShift.value = v));
+  fTex.add(params, 'edgeGlow', 0.0, 2.5, 0.01).name('Edge glow').onChange(v => material.userData.shader && (material.userData.shader.uniforms.uEdgeGlow.value = v));
 
-  /* ------------------------------------------------------------------------ */
-  /* Resize & Input                                                           */
-  /* ------------------------------------------------------------------------ */
+  // =========================
+  // Resize & input
+  // =========================
   window.addEventListener('resize', () => {
     const w = container.clientWidth, h = container.clientHeight;
     renderer.setSize(w, h);
     camera.aspect = w / h;
     camera.updateProjectionMatrix();
   });
+  window.addEventListener('keydown', (e) => { if (e.code === 'Space') params.play = !params.play; });
 
-  window.addEventListener('keydown', (e) => {
-    if (e.code === 'Space') params.play = !params.play;
-  });
-
-  /* ------------------------------------------------------------------------ */
-  /* Animate                                                                  */
-  /* ------------------------------------------------------------------------ */
+  // =========================
+  // Animate
+  // =========================
   const clock = new THREE.Clock();
 
-  function render() {
+  function frame() {
     const t = clock.getElapsedTime();
     if (params.play) applyFolds(t);
-
     if (material.userData.shader) {
       material.userData.shader.uniforms.uTime.value = t;
       material.userData.shader.uniforms.uStripeScale.value = params.stripeScale;
       material.userData.shader.uniforms.uStripeStrength.value = params.stripeStrength;
+      material.userData.shader.uniforms.uStripeSharpness.value = params.stripeSharpness;
       material.userData.shader.uniforms.uRainbowShift.value = params.rainbowShift;
       material.userData.shader.uniforms.uStripeMix.value = params.stripeMix;
+      material.userData.shader.uniforms.uEdgeGlow.value = params.edgeGlow;
     }
-
-    if (params.autoRotate) mesh.rotation.y += 0.0025;
+    if (params.autoRotate) mesh.rotation.y += 0.0023;
 
     controls.update();
     renderer.render(scene, camera);
-    requestAnimationFrame(render);
+    requestAnimationFrame(frame);
   }
-  render();
-
-  /* ------------------------------------------------------------------------ */
-  /* Helpers                                                                   */
-  /* ------------------------------------------------------------------------ */
-  function showErrorOverlay(message) {
-    const overlay = document.createElement('div');
-    overlay.style.position = 'absolute';
-    overlay.style.inset = '0';
-    overlay.style.background = 'linear-gradient(180deg, rgba(20,20,20,0.96), rgba(10,10,10,0.96))';
-    overlay.style.color = '#f8d7da';
-    overlay.style.display = 'grid';
-    overlay.style.placeItems = 'center';
-    overlay.style.font = '14px/1.5 system-ui, sans-serif';
-    overlay.innerHTML = `<div style="max-width:560px;padding:18px;border:1px solid #842029;border-radius:8px;background:#2a0004;">
-      <div style="font-weight:600;margin-bottom:6px;color:#ffd1d4;">WebGL not available</div>
-      <div>${message}</div>
-    </div>`;
-    container.appendChild(overlay);
-  }
+  frame();
 }
