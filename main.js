@@ -1,7 +1,7 @@
-// Self‑Folding Decahedron — Sequential (one face at a time)
-// Shapes: Pentagonal Dipyramid (10 triangles), Pentagonal Trapezohedron (10 kites)
-// Edges are pinned + welded; faces are rigid (flat-shaded). Post: Bloom (default 0), Trails, RGB offset.
-// Import-mapped modules; no bundler needed.
+// Self‑Folding Decahedron — Sequential (closed start, one face moves at a time)
+// Shapes: Pentagonal Dipyramid (10 triangles) / Pentagonal Trapezohedron (10 kites).
+// Edges are pinned + welded; faces remain rigid and flat-shaded.
+// Post: Bloom (default 0), Trails (Afterimage), RGB offset. Import-mapped modules; no bundler.
 
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
@@ -64,7 +64,7 @@ class RigidHingeMesh {
     }));
 
     // Triangulate faces (fan) -> geometry mapping
-    this._geomMap = [];                       // geometry vertex -> {face, local}
+    this._geomMap = []; // geometry vertex -> { face, local }
     const triangles = [];
     for (let fi = 0; fi < this.faces.length; fi++) {
       const m = this.faces[fi].rest.length;
@@ -115,12 +115,7 @@ class RigidHingeMesh {
     // Bind hinges (ordered list kept for sequential driver)
     this.hinges = [];
     for (const h of spec.hinges) this._bindHinge(h);
-
-    // Topological order (parents before children)
     this.faceOrder = this._topoOrder();
-
-    // First frame
-    this.update(0, { mode: 'sequential', speed: 1, foldMaxRad: THREE.MathUtils.degToRad(20), stepSec: 1.2 });
   }
 
   dispose() { this.geometry.dispose(); if (this.mesh.material) this.mesh.material.dispose(); }
@@ -307,10 +302,11 @@ class RigidHingeMesh {
       order.push(i);
     };
     for (let i = 0; i < this.faces.length; i++) if (this.faces[i].parent === null) dfs(i);
-    return order.reverse();
+    return order.reverse(); // parents before children
   }
 
   _composePinned(Mparent, parentFace, hinge, angle, outM) {
+    // Mchild = Mparent * T(Aw) * R(axis,angle) * T(-Aw) * bind
     const Arest = parentFace.rest[hinge.parentEdge[0]].clone();
     const Brest = parentFace.rest[hinge.parentEdge[1]].clone();
 
@@ -326,50 +322,32 @@ class RigidHingeMesh {
   }
 
   /**
-   * Update with three fold modes:
-   *  - sequential: one hinge opens/closes per step (default)
-   *  - self-fold: all top use +alpha(t), all bottom use -alpha(t)
-   *  - free: (legacy) each hinge runs its own oscillator (not used by default)
+   * Sequential driver: exactly one hinge opens->closes at a time.
+   * @param {number} timeSec
+   * @param {object} cfg { speed, foldMaxRad, stepSec, spinAmp }
    */
   update(timeSec, cfg) {
-    const mode = cfg?.mode ?? 'sequential';
     const speed = cfg?.speed ?? 1;
     const foldMaxRad = cfg?.foldMaxRad ?? THREE.MathUtils.degToRad(20);
-    const stepSec = Math.max(0.2, cfg?.stepSec ?? 1.2);
+    const stepSec = Math.max(0.05, cfg?.stepSec ?? 1.2);    // per-face time window
+    const spinAmp = cfg?.spinAmp ?? 0.0;                    // 0 = no global spin (keeps it self‑contained)
 
     // Root transforms
     for (let i = 0; i < this._M.length; i++) this._M[i].identity();
 
-    // Compute hinge angle resolver
-    const smooth = (x) => x * x * (3 - 2 * x); // smoothstep
+    // Active hinge + angle
+    const smooth = (x) => x * x * (3 - 2 * x);             // smoothstep
+    const t = timeSec * speed;
+    const idx = Math.floor(t / stepSec) % this.hinges.length;
+    const phase = (t % stepSec) / stepSec;                 // 0..1 within step
+    const tri = 1 - Math.abs(2 * phase - 1);               // 0 -> 1 -> 0
+    const a = foldMaxRad * smooth(tri);                    // 0..A..0
 
-    let angleForFace = (faceId, group) => 0; // default: closed
+    // Angle resolver: only the active hinge moves; others are closed
+    const active = this.hinges[idx];
+    const angleForFace = (fid, grp) => (fid === active.face ? (grp === 'bottom' ? -a : +a) : 0);
 
-    if (mode === 'sequential') {
-      // Select active hinge and open-close it with a triangular wave per step
-      const t = timeSec * speed;
-      const idx = Math.floor(t / stepSec) % this.hinges.length;
-      const phase = (t % stepSec) / stepSec;              // 0..1
-      const tri = 1 - Math.abs(2 * phase - 1);            // 0->1->0
-      const a = foldMaxRad * smooth(tri);
-      const active = this.hinges[idx];
-      angleForFace = (fid, grp) => (fid === active.face ? (grp === 'bottom' ? -a : +a) : 0);
-    }
-    else if (mode === 'self-fold') {
-      const t = timeSec * speed;
-      const u = 0.5 + 0.5 * Math.sin(2 * Math.PI * 0.10 * t);
-      const a = foldMaxRad * smooth(u);
-      angleForFace = (_fid, grp) => (grp === 'bottom' ? -a : +a);
-    }
-    else { // 'free' (legacy style, gentle)
-      const t = timeSec * speed;
-      angleForFace = (fid, grp) => {
-        const wiggle = 0.08 * Math.sin(2 * Math.PI * 0.05 * t + fid);
-        return (grp === 'bottom' ? -1 : +1) * (wiggle);
-      };
-    }
-
-    // Compose transforms hierarchically
+    // Compose transforms (parents first)
     for (let i = 0; i < this.faceOrder.length; i++) {
       const id = this.faceOrder[i];
       const f  = this.faces[id];
@@ -380,12 +358,12 @@ class RigidHingeMesh {
       this._composePinned(Mparent, this.faces[h.parent], h, angle, this._M[id]);
     }
 
-    // Gentle presentation
-    const yaw   = 0.12 * Math.sin(2 * Math.PI * 0.03 * timeSec);
-    const pitch = 0.10 * Math.sin(2 * Math.PI * 0.021 * timeSec + 0.8);
+    // Global *very* small presentation spin (default 0)
+    const yaw   = spinAmp * Math.sin(2 * Math.PI * 0.04 * timeSec);
+    const pitch = spinAmp * Math.sin(2 * Math.PI * 0.033 * timeSec + 0.8);
     const Mglobal = new THREE.Matrix4().makeRotationFromEuler(new THREE.Euler(pitch, yaw, 0, 'YXZ'));
 
-    // Pass 1: write world positions per face
+    // Pass 1: world positions per face
     for (let i = 0; i < this.faces.length; i++) {
       const M = new THREE.Matrix4().multiplyMatrices(Mglobal, this._M[i]);
       const fr = this.faces[i].rest;
@@ -402,7 +380,7 @@ class RigidHingeMesh {
       f.world[h.childEdge[1]].copy(parent.world[h.parentEdge[1]]);
     }
 
-    // Pass 3: update geometry positions
+    // Pass 3: write to geometry
     const pos = this.geometry.getAttribute('position');
     for (let vi = 0; vi < this._geomMap.length; vi++) {
       const m = this._geomMap[vi];
@@ -451,10 +429,7 @@ function buildPentagonalDipyramidSpec() {
   for (let i = 0; i < 5; i++) faces.push({ rest: [bot.clone(), ring[(i+1)%5].clone(), ring[i].clone()] });
 
   const hinges = [];
-  // Root = face 0
-  // Top chain around apex: share edge [top, ring[i]]
   for (let i = 1; i < 5; i++) hinges.push({ child: i, parent: i-1, parentEdge: [0,2], childEdge: [0,1], group: 'top' });
-  // Bottom chain starting from face 5 -> 0 across [ring0, ring1]
   hinges.push({ child: 5, parent: 0, parentEdge: [1,2], childEdge: [1,2], group: 'bottom' });
   for (let k = 6; k < 10; k++) hinges.push({ child: k, parent: k-1, parentEdge: [1,2], childEdge: [1,2], group: 'bottom' });
 
@@ -494,6 +469,14 @@ function switchShape(kind) {
   if (shape) { scene.remove(shape.group); shape.dispose(); shape = null; }
   shape = makeShape(kind);
   scene.add(shape.group);
+
+  // Force an initial closed frame (t=0) so the scene starts closed.
+  shape.update(0, {
+    speed: 0,
+    foldMaxRad: THREE.MathUtils.degToRad(params.foldMaxDeg),
+    stepSec: params.stepTime,
+    spinAmp: params.spinAmplitude
+  });
 }
 
 // ---------- Post‑processing ----------
@@ -529,11 +512,11 @@ const params = {
   objectType: 'dipyramid',              // 'dipyramid' | 'trapezohedron'
   play: true,
 
-  // Folding (sequential by default)
-  foldMode: 'sequential',               // 'sequential' | 'self-fold' | 'free'
-  foldSpeed: 1.0,                       // global time scale
+  // Sequential folding
+  foldSpeed: 1.0,                       // global time scale (up to 20×)
   foldMaxDeg: 22,                       // peak angle for the active hinge (°)
   stepTime: 1.2,                        // seconds per face (open->close)
+  spinAmplitude: 0.0,                   // small presentation spin (0 = off, default)
 
   // Glow (Bloom)
   bloomStrength: 0.0,                   // default 0
@@ -558,15 +541,11 @@ fShape.add(params, 'objectType', {
   'Pentagonal Trapezohedron (10 kites)': 'trapezohedron'
 }).name('Object Type').onChange(v => switchShape(v));
 
-const fFold = gui.addFolder('Folding');
-fFold.add(params, 'foldMode', {
-  'Sequential (one face)': 'sequential',
-  'Self-fold (all)': 'self-fold',
-  'Free (legacy)': 'free'
-}).name('Mode');
-fFold.add(params, 'foldSpeed', 0.0, 3.0, 0.01).name('Speed');
+const fFold = gui.addFolder('Folding (Sequential)');
+fFold.add(params, 'foldSpeed', 0.0, 20.0, 0.01).name('Speed (×)');
 fFold.add(params, 'foldMaxDeg', 0.0, 60.0, 0.1).name('Peak Angle (°)');
-fFold.add(params, 'stepTime', 0.2, 6.0, 0.01).name('Step Time (s)');
+fFold.add(params, 'stepTime', 0.05, 6.0, 0.01).name('Step Time (s)');
+fFold.add(params, 'spinAmplitude', 0.0, 0.3, 0.001).name('Spin Amplitude').listen();
 
 const fGlow = gui.addFolder('Glow (Bloom)');
 fGlow.add(params, 'bloomStrength', 0.0, 2.5, 0.01).name('Strength').onChange(v => { bloomPass.strength = v; bloomPass.enabled = v > 0.0; });
@@ -589,7 +568,7 @@ fView.add(params, 'exposure', 0.6, 1.8, 0.01).name('Exposure').onChange(v => ren
 fView.add(params, 'resetCamera').name('Reset Camera');
 
 // ---------- Boot + loop ----------
-switchShape(params.objectType);
+switchShape(params.objectType); // creates the mesh and commits a closed first frame
 
 let t0 = performance.now();
 function animate() {
@@ -598,10 +577,10 @@ function animate() {
 
   if (params.play && shape) {
     shape.update(t, {
-      mode: params.foldMode,
       speed: params.foldSpeed,
       foldMaxRad: THREE.MathUtils.degToRad(params.foldMaxDeg),
-      stepSec: params.stepTime
+      stepSec: params.stepTime,
+      spinAmp: params.spinAmplitude
     });
   }
 
