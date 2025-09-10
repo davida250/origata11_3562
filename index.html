@@ -2,48 +2,84 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Folding Birefringent Polyhedron — Three.js</title>
+  <title>Endless Folding Iridescent Polyhedron</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
-    html, body { height: 100%; margin: 0; background: #000; color: #ddd; font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }
-    .layout {
+    :root {
+      --panel-width: 300px;
+      --bg: #000;
+      --text: #e7e7e7;
+      --accent: #8fd3ff;
+    }
+
+    html, body {
+      margin: 0;
+      height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+    }
+
+    /* Two-column layout: canvas on the left, controls on the right */
+    .app {
       display: grid;
-      grid-template-columns: 1fr 300px;
+      grid-template-columns: 1fr var(--panel-width);
       grid-template-rows: 100%;
       height: 100%;
       width: 100%;
+      overflow: hidden;
     }
-    #viewport { position: relative; overflow: hidden; }
-    #ui { background: rgba(12,12,12,0.96); border-left: 1px solid #1a1a1a; padding: 10px 10px; overflow-y: auto; }
-    .note {
-      position: absolute; left: 12px; bottom: 12px; color: #9aa; opacity: 0.9;
-      font-size: 12px; line-height: 1.35; pointer-events: none; text-shadow: 0 1px 0 rgba(0,0,0,0.6);
-    }
-    canvas { display: block; }
-  </style>
 
-  <!-- Import maps -->
-  <script type="importmap">
-    {
-      "imports": {
-        "three": "https://unpkg.com/three@0.165.0/build/three.module.js",
-        "three/addons/": "https://unpkg.com/three@0.165.0/examples/jsm/",
-        "lil-gui": "https://unpkg.com/lil-gui@0.20.0/dist/lil-gui.esm.min.js"
-      }
+    #scene-container {
+      position: relative;
+      background: #000;
     }
-  </script>
+
+    canvas { display: block; }
+
+    /* Right-side control panel shell */
+    #ui {
+      position: relative;
+      border-left: 1px solid #222;
+      background: #0b0b0b;
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,0.02);
+      padding: 8px 8px 24px 8px;
+      overflow-y: auto;
+    }
+
+    .brand {
+      font-size: 12px;
+      letter-spacing: .05em;
+      color: #9aa0a6;
+      margin: 6px 8px 14px 8px;
+      border-bottom: 1px solid #161616;
+      padding-bottom: 8px;
+    }
+    .brand b { color: var(--accent); }
+
+    /* Make lil-gui sit flush and fill panel width */
+    #ui .lil-gui.root {
+      width: calc(var(--panel-width) - 16px) !important;
+      max-width: calc(var(--panel-width) - 16px) !important;
+    }
+
+    a, a:visited { color: #8fd3ff; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+  </style>
 </head>
 <body>
-  <div class="layout">
-    <div id="viewport">
-      <div class="note">
-        Drag to orbit · Wheel to zoom · <b>Space</b> = Pause/Play<br/>
-        Goal: one shape that folds on edge hinges and shows iridescent, striped interference like the contact sheet.
+  <div class="app">
+    <div id="scene-container" aria-label="Three.js canvas host"></div>
+    <aside id="ui">
+      <div class="brand">
+        <b>Endless Fold</b> — rigid faces, hinge only<br/>
+        Iridescence + banded interference (IBL)
       </div>
-    </div>
-    <div id="ui"></div>
+      <!-- lil-gui will be appended here -->
+    </aside>
   </div>
 
+  <!-- App script (ESM) -->
   <script type="module" src="./main.js"></script>
 </body>
 </html>
