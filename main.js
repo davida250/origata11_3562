@@ -1,15 +1,9 @@
-// Endless Folding Decahedron — with Shape Selector
+// Self‑Folding Decahedron (compact, no flailing)
 // - Shapes: Pentagonal Dipyramid (10 triangles), Pentagonal Trapezohedron (10 kites)
-// - Rigid faces only; hinges are pinned -> shared edges never separate.
-// - Iridescent base (MeshPhysicalMaterial) + rich tri-planar, domain-warped interference overlay.
-// - Controls (right): Shape, Fold Speed, Glow (Bloom, default 0), Trails (Afterimage), RGB Offset.
-//
-// References used while building (docs/examples):
-//   - Pentagonal dipyramid (decahedron of 10 triangles).  Wikipedia.          // https://en.wikipedia.org/wiki/Pentagonal_bipyramid
-//   - Pentagonal trapezohedron (10 kites), D10 shape.   Wikipedia/MathWorld.   // https://en.wikipedia.org/wiki/Pentagonal_trapezohedron
-//   - MeshPhysicalMaterial iridescence (thin-film).      three.js docs.        // https://threejs.org/docs/api/en/materials/MeshPhysicalMaterial.html
-//   - EffectComposer + passes: UnrealBloom, Afterimage, RGBShift.              // https://threejs.org/docs/examples/en/postprocessing/EffectComposer.html
-//   - Import maps (bare specifiers) + ES Module Shims.                         // MDN + ESMS https://developer.mozilla.org/.../script/type/importmap
+// - Faces are rigid; hinges are pinned and edges are welded => no gaps.
+// - One‑parameter "self‑fold" driver: all top hinges use +alpha(t), bottoms use −alpha(t).
+// - Right‑panel controls: Shape, Fold Speed, Fold Range, Glow (Bloom, default 0), Trails (Afterimage), RGB Offset.
+// - Material: MeshPhysicalMaterial with iridescence + tri‑planar domain‑warped interference overlay.
 
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
@@ -24,72 +18,67 @@ import { RGBShiftShader } from 'three/addons/shaders/RGBShiftShader.js';
 
 import GUI from 'https://cdn.jsdelivr.net/npm/lil-gui@0.20/+esm';
 
-// ---------- Scene bootstrap ----------
+// ---------- Scene ----------
 const container = document.getElementById('scene-container');
 
 const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 renderer.setSize(container.clientWidth, container.clientHeight);
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 1.15;
+renderer.toneMappingExposure = 1.12;
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 container.appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x000000);
 
-// Camera + controls
+// Camera / Controls
 const camera = new THREE.PerspectiveCamera(36, container.clientWidth / container.clientHeight, 0.01, 100);
-camera.position.set(3.2, 1.8, 4.8);
-
+camera.position.set(3.0, 1.7, 4.4);
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
 controls.dampingFactor = 0.06;
 controls.minDistance = 2.0;
 controls.maxDistance = 9.0;
 
-// Environment (PMREM + RoomEnvironment)
+// Neutral environment (PMREM) for PBR / iridescence
 const pmrem = new THREE.PMREMGenerator(renderer);
 const envRT = pmrem.fromScene(new RoomEnvironment(), 0.04);
 scene.environment = envRT.texture;
 
-// ---------- Generic Rigid Hinge Mesh (supports polygonal faces: triangles or kites) ----------
+// ---------- Rigid hinge mesh (generic; supports triangles or quads (kites)) ----------
 class RigidHingeMesh {
   /**
    * @param {Object} spec
-   *   spec.faces: Array<{ rest: THREE.Vector3[], tag?: string }>
-   *   spec.hinges: Array<{ child:number, parent:number, parentEdge:[number,number], childEdge:[number,number], ampDeg:number, freq:number, phase:number }>
-   *   spec.material?: THREE.Material
+   *   faces: Array<{ rest: THREE.Vector3[] }>
+   *   hinges: Array<{ child, parent, parentEdge:[i,j], childEdge:[i,j], group:'top'|'bottom' }>
    */
   constructor(spec) {
     this.group = new THREE.Group();
-
-    // Deep copy face data
+    // Make a deep copy of faces
     this.faces = spec.faces.map((f, id) => ({
       id,
-      tag: f.tag || '',
       rest: f.rest.map(v => v.clone()),
       world: f.rest.map(v => v.clone()),
       parent: null,
       hinge: null
     }));
 
-    // Triangulate each face (fan): store mapping from geometry vertex -> (face, local-vertex)
-    this._geomMap = []; // array of {face, local}
-    const tris = [];
+    // Triangulate each face (fan) so we can render rigid quads as one planar face
+    this._geomMap = []; // each entry maps geometry vertex -> { face, local }
+    const triangles = [];
     for (let fi = 0; fi < this.faces.length; fi++) {
       const m = this.faces[fi].rest.length;
       for (let k = 1; k < m - 1; k++) {
-        // triangle (0, k, k+1)
-        tris.push([ [fi,0], [fi,k], [fi,k+1] ]);
+        triangles.push([[fi,0],[fi,k],[fi,k+1]]);
         this._geomMap.push({ face: fi, local: 0 });
         this._geomMap.push({ face: fi, local: k });
         this._geomMap.push({ face: fi, local: k+1 });
       }
     }
 
-    // Create geometry
-    const triCount = tris.length;
+    // Geometry buffers
+    const triCount = triangles.length;
     const positions = new Float32Array(triCount * 3 * 3);
     const normals   = new Float32Array(triCount * 3 * 3);
     const geometry  = new THREE.BufferGeometry();
@@ -98,63 +87,54 @@ class RigidHingeMesh {
     geometry.setIndex([...Array(triCount * 3).keys()]);
     geometry.computeBoundingSphere();
 
-    // Material (physical with iridescence); overlay added later
-    const mat = (spec.material instanceof THREE.Material) ? spec.material : new THREE.MeshPhysicalMaterial({
+    // Physical material with iridescence (thin‑film) — see three.js docs
+    const material = new THREE.MeshPhysicalMaterial({
       color: 0x151515,
       roughness: 0.26,
       metalness: 0.0,
-      envMapIntensity: 1.2,
-      iridescence: 1.0,                // three.js iridescence (thin-film) — see docs
+      envMapIntensity: 1.15,
+      iridescence: 1.0,
       iridescenceIOR: 1.3,
       iridescenceThicknessRange: [120, 620],
       flatShading: true
     });
+    this._injectOverlay(material); // adds tri‑planar interference emissive overlay
 
-    this._injectOverlay(mat);
+    this.mesh = new THREE.Mesh(geometry, material);
+    this.mesh.castShadow = this.mesh.receiveShadow = false;
+    this.group.add(this.mesh);
 
-    const mesh = new THREE.Mesh(geometry, mat);
-    mesh.castShadow = mesh.receiveShadow = false;
-    this.group.add(mesh);
-
-    this.mesh = mesh;
     this.geometry = geometry;
     this.triCount = triCount;
 
-    // Build hinges (compute bind for each)
+    // Build hinges with bind transforms so edges are pinned at angle=0
     this._M = this.faces.map(() => new THREE.Matrix4());
     this._mTA = new THREE.Matrix4();
     this._mTNegA = new THREE.Matrix4();
     this._mRot = new THREE.Matrix4();
 
-    // Attach hinges
-    const hinges = spec.hinges || [];
-    for (const h of hinges) this._bindHinge(h);
-
-    // Order (parent before child). Here we just make a simple topological order.
+    for (const h of spec.hinges) this._bindHinge(h);
     this.faceOrder = this._topoOrder();
 
-    this.update(0, 1.0);
+    this.update(0, 1, {min: 8*Math.PI/180, max: 22*Math.PI/180}); // initial fold
   }
 
-  dispose() {
-    this.geometry.dispose();
-    if (this.mesh.material) this.mesh.material.dispose();
-  }
+  dispose() { this.geometry.dispose(); if (this.mesh.material) this.mesh.material.dispose(); }
 
-  // ---------- Overlay (tri-planar, domain-warped interference + cellular) ----------
+  // ----- Material overlay (iridescent‑friendly bands + cellular, tri‑planar, domain‑warped) -----
   _injectOverlay(material) {
     const uniforms = {
       uTime:         { value: 0 },
-      uBandAngle:    { value: THREE.MathUtils.degToRad(28.0) },
-      uBandSpeed:    { value: 0.25 },
+      uBandAngle:    { value: THREE.MathUtils.degToRad(24.0) },
+      uBandSpeed:    { value: 0.22 },
       uBandFreq1:    { value: 6.0 },
-      uBandFreq2:    { value: 9.5 },
+      uBandFreq2:    { value: 9.0 },
       uBandAngle2:   { value: THREE.MathUtils.degToRad(82.0) },
       uBandStrength: { value: 0.52 },
-      uTriScale:     { value: 1.15 },
+      uTriScale:     { value: 1.1 },
       uWarp:         { value: 0.55 },
       uCellAmp:      { value: 0.55 },
-      uCellFreq:     { value: 2.75 }
+      uCellFreq:     { value: 2.6 }
     };
 
     material.onBeforeCompile = (shader) => {
@@ -262,11 +242,9 @@ class RigidHingeMesh {
             vec3 colYZ = stripeField(p.zy, uBandAngle);
 
             vec3 c = w.x * colYZ + w.y * colXZ + w.z * colXY;
-
             totalEmissiveRadiance += c * uBandStrength;
           }
         `);
-
       material.userData._overlayUniforms = uniforms;
     };
     material.needsUpdate = true;
@@ -275,7 +253,7 @@ class RigidHingeMesh {
   _pickThirdIndex(face, i, j) {
     const m = face.rest.length;
     for (let k = 0; k < m; k++) if (k !== i && k !== j) return k;
-    return 0; // fallback
+    return 0;
   }
 
   _bindHinge(h) {
@@ -311,15 +289,7 @@ class RigidHingeMesh {
     const bind = new THREE.Matrix4().compose(pos, q, new THREE.Vector3(1,1,1));
 
     child.parent = h.parent;
-    child.hinge  = {
-      parent: h.parent,
-      parentEdge: h.parentEdge.slice(0),
-      childEdge:  h.childEdge.slice(0),
-      amp: THREE.MathUtils.degToRad(h.ampDeg),
-      freq: h.freq,
-      phase: h.phase,
-      bind
-    };
+    child.hinge  = { parent: h.parent, parentEdge: h.parentEdge.slice(0), childEdge: h.childEdge.slice(0), group: h.group, bind };
   }
 
   _topoOrder() {
@@ -332,47 +302,38 @@ class RigidHingeMesh {
       }
       order.push(i);
     };
-    // find roots (no parent)
     for (let i = 0; i < this.faces.length; i++) if (this.faces[i].parent === null) dfs(i);
-    // parents before children
-    return order.reverse();
+    return order.reverse(); // parents before children
   }
 
   _composePinned(Mparent, parentFace, hinge, angle, outM) {
+    // Mchild = Mparent * T(Aw) * R(axis,angle) * T(-Aw) * bind
     const Arest = parentFace.rest[hinge.parentEdge[0]].clone();
     const Brest = parentFace.rest[hinge.parentEdge[1]].clone();
 
     const Aw = Arest.clone().applyMatrix4(Mparent);
     const Bw = Brest.clone().applyMatrix4(Mparent);
-
     const axis = new THREE.Vector3().subVectors(Bw, Aw).normalize();
 
     this._mTA.makeTranslation(Aw.x, Aw.y, Aw.z);
     this._mTNegA.makeTranslation(-Aw.x, -Aw.y, -Aw.z);
     this._mRot.makeRotationAxis(axis, angle);
 
-    outM.copy(Mparent)
-        .multiply(this._mTA)
-        .multiply(this._mRot)
-        .multiply(this._mTNegA)
-        .multiply(hinge.bind);
+    outM.copy(Mparent).multiply(this._mTA).multiply(this._mRot).multiply(this._mTNegA).multiply(hinge.bind);
   }
 
-  update(t, speed = 1.0) {
-    // unified driver for "self-fold" mode
-    const ease = (x) => x*x*(3 - 2*x); // smoothstep
-    const q01 = 0.5 + 0.5 * Math.sin(2 * Math.PI * (0.10 * speed) * t); // base 0..1
-    const s   = ease(q01);
-    const aMin = THREE.MathUtils.degToRad(params.foldMinDeg);
-    const aMax = THREE.MathUtils.degToRad(params.foldMaxDeg);
-    const alpha = THREE.MathUtils.lerp(aMin, aMax, s);   // top hinges
-    const beta  = -alpha;                                 // bottom hinges (mirror)
-    const q = (f, p) => Math.sin(2 * Math.PI * (f * speed) * t + p); // fallback for "free" mode
+  // Single‑parameter fold: angles for 'top' group = +alpha(t); for 'bottom' group = −alpha(t).
+  update(t, speed = 1.0, foldRange = {min: 8*Math.PI/180, max: 22*Math.PI/180}) {
+    const smoothstep = (x) => x*x*(3 - 2*x);
+    const q01 = 0.5 + 0.5 * Math.sin(2 * Math.PI * (0.10 * speed) * t); // 0..1
+    const s = smoothstep(q01);
+    const alpha = THREE.MathUtils.lerp(foldRange.min, foldRange.max, s);
+    const beta  = -alpha;
 
-    // Root faces (no parent)
+    // Reset transforms (roots first)
     for (let i = 0; i < this._M.length; i++) this._M[i].identity();
 
-    // Child transforms
+    // Compose child transforms hierarchically
     for (let i = 0; i < this.faceOrder.length; i++) {
       const id = this.faceOrder[i];
       const f  = this.faces[id];
@@ -380,89 +341,65 @@ class RigidHingeMesh {
 
       const h = f.hinge;
       const Mparent = this._M[h.parent];
-
-      let angle;
-      if (params.foldMode === 'self-fold') {
-        // group-aware coordinated angles; hinges declare .group = 'top' | 'bottom' | (optional) 'eq'
-        // if group missing, treat as top
-        const g = h.group || 'top';
-        angle = (g === 'bottom') ? beta : alpha;
-      } else {
-        // original multi-DOF (free) behavior
-        angle = h.amp * q(h.freq, h.phase) + 0.10 * Math.sin(2 * Math.PI * (0.05 * speed) * t + id);
-      }
-
+      const angle = (h.group === 'bottom') ? beta : alpha; // default 'top' if not specified
       this._composePinned(Mparent, this.faces[h.parent], h, angle, this._M[id]);
     }
 
-    // Global gentle presentation rotation
-    const yaw   = 0.22 * Math.sin(2 * Math.PI * 0.03 * t);
-    const pitch = 0.17 * Math.sin(2 * Math.PI * 0.021 * t + 1.2);
+    // Gentle presentation (very small so the object stays "self‑contained")
+    const yaw   = 0.12 * Math.sin(2 * Math.PI * 0.03 * t);
+    const pitch = 0.10 * Math.sin(2 * Math.PI * 0.021 * t + 0.8);
     const Mglobal = new THREE.Matrix4().makeRotationFromEuler(new THREE.Euler(pitch, yaw, 0, 'YXZ'));
 
-    // Pass 1: transform face vertices
+    // Pass 1: transform all face-local vertices to world
     for (let i = 0; i < this.faces.length; i++) {
       const M = new THREE.Matrix4().multiplyMatrices(Mglobal, this._M[i]);
       const fr = this.faces[i].rest;
-      for (let k = 0; k < fr.length; k++) {
-        this.faces[i].world[k].copy(fr[k]).applyMatrix4(M);
-      }
+      for (let k = 0; k < fr.length; k++) this.faces[i].world[k].copy(fr[k]).applyMatrix4(M);
     }
 
-    // Pass 2 (weld): copy parent's hinge vertices into child hinge vertices
+    // Pass 2: weld shared hinge vertices (kill numeric drift)
     for (let i = 0; i < this.faces.length; i++) {
       const f = this.faces[i];
       if (!f.hinge) continue;
       const h = f.hinge;
       const parent = this.faces[h.parent];
-
-      const pA = parent.world[h.parentEdge[0]];
-      const pB = parent.world[h.parentEdge[1]];
-
-      f.world[h.childEdge[0]].copy(pA);
-      f.world[h.childEdge[1]].copy(pB);
+      f.world[h.childEdge[0]].copy(parent.world[h.parentEdge[0]]);
+      f.world[h.childEdge[1]].copy(parent.world[h.parentEdge[1]]);
     }
 
-    // Pass 3: write positions per geometry vertex from face/world map
-    const posAttr = this.geometry.getAttribute('position');
-    for (let gv = 0; gv < this._geomMap.length; gv++) {
-      const m = this._geomMap[gv];
+    // Pass 3: write positions to geometry and recompute flat normals
+    const pos = this.geometry.getAttribute('position');
+    for (let vi = 0; vi < this._geomMap.length; vi++) {
+      const m = this._geomMap[vi];
       const w = this.faces[m.face].world[m.local];
-      posAttr.setXYZ(gv, w.x, w.y, w.z);
+      pos.setXYZ(vi, w.x, w.y, w.z);
     }
-    posAttr.needsUpdate = true;
+    pos.needsUpdate = true;
 
-    // Pass 4: recompute flat normals per triangle
-    const nrmAttr = this.geometry.getAttribute('normal');
-    const arr = posAttr.array;
-    const nArr = nrmAttr.array;
+    const nrm = this.geometry.getAttribute('normal');
+    const arr = pos.array, nArr = nrm.array;
     const v0 = new THREE.Vector3(), v1 = new THREE.Vector3(), v2 = new THREE.Vector3();
     const e1 = new THREE.Vector3(), e2 = new THREE.Vector3(), n  = new THREE.Vector3();
     for (let tIdx = 0; tIdx < this.triCount; tIdx++) {
-      const i0 = (tIdx * 3 + 0) * 3;
-      const i1 = (tIdx * 3 + 1) * 3;
-      const i2 = (tIdx * 3 + 2) * 3;
+      const i0 = (tIdx * 3 + 0) * 3, i1 = (tIdx * 3 + 1) * 3, i2 = (tIdx * 3 + 2) * 3;
       v0.set(arr[i0], arr[i0+1], arr[i0+2]);
       v1.set(arr[i1], arr[i1+1], arr[i1+2]);
       v2.set(arr[i2], arr[i2+1], arr[i2+2]);
-      e1.subVectors(v1, v0);
-      e2.subVectors(v2, v0);
-      n.copy(e1).cross(e2).normalize();
-      nArr[i0] = nArr[i1] = nArr[i2] = n.x;
-      nArr[i0+1] = nArr[i1+1] = nArr[i2+1] = n.y;
-      nArr[i0+2] = nArr[i1+2] = nArr[i2+2] = n.z;
+      e1.subVectors(v1, v0); e2.subVectors(v2, v0); n.copy(e1).cross(e2).normalize();
+      nArr[i0] = nArr[i1] = nArr[i2] = n.x; nArr[i0+1] = nArr[i1+1] = nArr[i2+1] = n.y; nArr[i0+2] = nArr[i1+2] = nArr[i2+2] = n.z;
     }
-    nrmAttr.needsUpdate = true;
+    nrm.needsUpdate = true;
 
-    // Drive overlay time
+    // Drive overlay animation
     const uniforms = this.mesh.material.userData._overlayUniforms;
     if (uniforms) uniforms.uTime.value = t;
   }
 }
 
-// ---------- Shape builders ----------
+// ---------- Shape builders (compact, self‑contained) ----------
 function buildPentagonalDipyramidSpec() {
-  const R = 1.05, H = 1.10, jitter = 0.025;
+  // 10 triangles (convex) => decahedron; slight irregularity keeps it “organic”
+  const R = 1.00, H = 1.08, jitter = 0.03;
   const top = new THREE.Vector3(0,  H, 0);
   const bot = new THREE.Vector3(0, -H, 0);
   const ring = [];
@@ -473,53 +410,28 @@ function buildPentagonalDipyramidSpec() {
   }
 
   const faces = [];
-  // Top 5 triangles
-  for (let i = 0; i < 5; i++) {
-    faces.push({ rest: [top.clone(), ring[i].clone(), ring[(i+1)%5].clone()], tag: 'T' });
-  }
-  // Bottom 5 triangles (winding to keep outward normals)
-  for (let i = 0; i < 5; i++) {
-    faces.push({ rest: [bot.clone(), ring[(i+1)%5].clone(), ring[i].clone()], tag: 'B' });
-  }
+  for (let i = 0; i < 5; i++) faces.push({ rest: [top.clone(), ring[i].clone(), ring[(i+1)%5].clone()] }); // top 5
+  for (let i = 0; i < 5; i++) faces.push({ rest: [bot.clone(), ring[(i+1)%5].clone(), ring[i].clone()] }); // bottom 5
 
   const hinges = [];
-  // Root = face 0 (top wedge)
-  // Top chain around apex: share edge [top, ring[i]]
+  // Root: face 0 (top wedge). Short chains to minimize compounding.
+  // Top wedges: each hinged to the previous around the apex edge [top, ring[i]].
   for (let i = 1; i < 5; i++) {
-    hinges.push({
-      child: i, parent: i-1,
-      parentEdge: [0,2], // in parent face (top, ring[i])
-      childEdge:  [0,1],
-      group: 'top',
-      ampDeg: 36 - i, freq: 0.10 + 0.02*i, phase: 0.6*i
-    });
+    hinges.push({ child: i, parent: i-1, parentEdge: [0,2], childEdge: [0,1], group: 'top' });
   }
-  // Bottom chain starting at face 5 hinged to face 0 along edge [ring0, ring1] -> in top face [1,2], in bottom [1,2]
-  hinges.push({ child: 5, parent: 0, parentEdge: [1,2], childEdge: [1,2], group: 'bottom', ampDeg: 44, freq: 0.16, phase: 0.5 });
-
+  // Bottom wedges: start from face5 hinged to face0 across equator edge [ring0, ring1] and chain.
+  hinges.push({ child: 5, parent: 0, parentEdge: [1,2], childEdge: [1,2], group: 'bottom' });
   for (let k = 6; k < 10; k++) {
-    hinges.push({
-      child: k, parent: k-1,
-      parentEdge: [1,2], childEdge: [1,2],
-      group: 'bottom',
-      ampDeg: 42 - (k-6), freq: 0.09 + 0.02*(k-6), phase: 0.85 + 0.75*(k-6)
-    });
+    hinges.push({ child: k, parent: k-1, parentEdge: [1,2], childEdge: [1,2], group: 'bottom' });
   }
 
   return { faces, hinges };
 }
 
 function buildPentagonalTrapezohedronSpec() {
-  // Two polar vertices + two offset 5-gon rings -> 10 kite faces
-  const H = 1.05;      // pole height
-  const h = 0.42;      // ring heights
-  const R1 = 0.95;     // top ring radius
-  const R2 = 1.05;     // bottom ring radius (asymmetry -> kite)
-  const off = Math.PI / 5; // 36° offset between rings
-
-  const N = new THREE.Vector3(0,  H, 0);
-  const S = new THREE.Vector3(0, -H, 0);
-
+  // 10 kites (convex) => decahedron (D10 dice shape)
+  const H = 1.02, h = 0.42, R1 = 0.96, R2 = 1.04, off = Math.PI / 5;
+  const N = new THREE.Vector3(0,  H, 0), S = new THREE.Vector3(0, -H, 0);
   const topR = [], botR = [];
   for (let i = 0; i < 5; i++) {
     const aTop = (i / 5) * Math.PI * 2;
@@ -529,140 +441,81 @@ function buildPentagonalTrapezohedronSpec() {
   }
 
   const faces = [];
-  // Top ring of 5 kites: [N, Top[i], Bot[i], Top[i+1]]
-  for (let i = 0; i < 5; i++) {
-    faces.push({ rest: [N.clone(), topR[i].clone(), botR[i].clone(), topR[(i+1)%5].clone()], tag: 'U' });
-  }
-  // Bottom ring of 5 kites: [S, Bot[i], Top[i], Bot[i+1]]
-  for (let i = 0; i < 5; i++) {
-    faces.push({ rest: [S.clone(), botR[i].clone(), topR[i].clone(), botR[(i+1)%5].clone()], tag: 'L' });
-  }
+  for (let i = 0; i < 5; i++) faces.push({ rest: [N.clone(), topR[i].clone(), botR[i].clone(), topR[(i+1)%5].clone()] }); // upper kites
+  for (let i = 0; i < 5; i++) faces.push({ rest: [S.clone(), botR[i].clone(), topR[i].clone(), botR[(i+1)%5].clone()] }); // lower kites
 
   const hinges = [];
-  // Root face 0 (upper kite)
-  // Upper chain: share edge [N, Top[i]] : in parent (0..4), the shared edge is [0,3]; in child it's [0,1]
-  for (let i = 1; i < 5; i++) {
-    hinges.push({
-      child: i, parent: i-1,
-      parentEdge: [0,3], childEdge: [0,1],
-      group: 'top',
-      ampDeg: 34 - i, freq: 0.11 + 0.02*i, phase: 0.8*i
-    });
-  }
-  // Lower chain starts at face 5 hinged to face 0 along edge [Top0, Bot0] which is [1,2] in both
-  hinges.push({ child: 5, parent: 0, parentEdge: [1,2], childEdge: [1,2], group: 'bottom', ampDeg: 40, freq: 0.15, phase: 0.5 });
-
-  for (let k = 6; k < 10; k++) {
-    hinges.push({
-      child: k, parent: k-1,
-      parentEdge: [0,3],
-      childEdge:  [0,1],
-      group: 'bottom',
-      ampDeg: 38 - (k-6), freq: 0.10 + 0.02*(k-6), phase: 1.1 + 0.7*(k-6)
-    });
-  }
+  // Root = face 0. Short chains around the pole for compact motion.
+  for (let i = 1; i < 5; i++) hinges.push({ child: i, parent: i-1, parentEdge: [0,3], childEdge: [0,1], group: 'top' });
+  hinges.push({ child: 5, parent: 0, parentEdge: [1,2], childEdge: [1,2], group: 'bottom' });
+  for (let k = 6; k < 10; k++) hinges.push({ child: k, parent: k-1, parentEdge: [0,3], childEdge: [0,1], group: 'bottom' });
 
   return { faces, hinges };
 }
 
-// ---------- Shape instance management ----------
+// ---------- Instance management ----------
 let shape = null;
-
 function makeShape(kind) {
-  const spec = (kind === 'trapezohedron') ? buildPentagonalTrapezohedronSpec()
-                                          : buildPentagonalDipyramidSpec();
-  const inst = new RigidHingeMesh(spec);
-  return inst;
+  return new RigidHingeMesh(kind === 'trapezohedron' ? buildPentagonalTrapezohedronSpec()
+                                                     : buildPentagonalDipyramidSpec());
 }
-
 function switchShape(kind) {
-  const prevUniforms = shape?.mesh.material.userData._overlayUniforms || null;
-
-  if (shape) {
-    scene.remove(shape.group);
-    shape.dispose();
-    shape = null;
-  }
+  if (shape) { scene.remove(shape.group); shape.dispose(); shape = null; }
   shape = makeShape(kind);
   scene.add(shape.group);
-
-  // Reapply overlay uniforms from previous instance so UI values persist
-  if (prevUniforms) {
-    const u = shape.mesh.material.userData._overlayUniforms;
-    if (u) {
-      u.uBandAngle.value    = prevUniforms.uBandAngle.value;
-      u.uBandSpeed.value    = prevUniforms.uBandSpeed.value;
-      u.uBandFreq1.value    = prevUniforms.uBandFreq1.value;
-      u.uBandFreq2.value    = prevUniforms.uBandFreq2.value;
-      u.uBandAngle2.value   = prevUniforms.uBandAngle2.value;
-      u.uBandStrength.value = prevUniforms.uBandStrength.value;
-      u.uTriScale.value     = prevUniforms.uTriScale.value;
-      u.uWarp.value         = prevUniforms.uWarp.value;
-      u.uCellAmp.value      = prevUniforms.uCellAmp.value;
-      u.uCellFreq.value     = prevUniforms.uCellFreq.value;
-    }
-  }
 }
 
-// ---------- Post-processing pipeline ----------
+// ---------- Post‑processing ----------
 const composer = new EffectComposer(renderer);
 composer.addPass(new RenderPass(scene, camera));
 
-// Trails (Afterimage)
 const afterimagePass = new AfterimagePass();
-afterimagePass.enabled = false;                        // default off
-afterimagePass.uniforms['damp'].value = 1.0;           // 1.0 ~ no trail
+afterimagePass.enabled = false;              // default off (trails)
+afterimagePass.uniforms['damp'].value = 1.0; // 1.0 ~ no trails
 composer.addPass(afterimagePass);
 
-// Glow / Bloom
 const bloomPass = new UnrealBloomPass(
   new THREE.Vector2(container.clientWidth, container.clientHeight),
-  0.0, // strength default 0 (off)
-  0.2, // radius
-  0.9  // threshold
+  0.0,  // strength (default 0 => disabled)
+  0.2,  // radius
+  0.9   // threshold
 );
 bloomPass.enabled = false;
 composer.addPass(bloomPass);
 
-// RGB offset
 const rgbShiftPass = new ShaderPass(RGBShiftShader);
 rgbShiftPass.enabled = false;
-rgbShiftPass.uniforms['amount'].value = 0.0;  // typical 0.0005..0.01
+rgbShiftPass.uniforms['amount'].value = 0.0;
 rgbShiftPass.uniforms['angle'].value  = 0.0;
 composer.addPass(rgbShiftPass);
 
 // ---------- GUI ----------
 const uiHost = document.getElementById('ui');
-const gui = new GUI({ title: 'Controls', width: 320 });
+const gui = new GUI({ title: 'Controls', width: 330 });
 uiHost.appendChild(gui.domElement);
 
 const params = {
-  objectType: 'dipyramid', // 'dipyramid' | 'trapezohedron'
+  objectType: 'dipyramid',              // 'dipyramid' | 'trapezohedron'
   play: true,
-  foldSpeed: 1.0,
-  foldMode: 'self-fold',   // 'self-fold' | 'free'
-  foldMinDeg: 8.0,         // alpha_min
-  foldMaxDeg: 65.0,        // alpha_max
+  foldSpeed: 1.0,                       // scales the 1‑DOF driver
+  foldMin: 8,                           // degrees (compactness)
+  foldMax: 22,                          // degrees
 
-  // Glow (bloom)
-  bloomStrength: 0.0, // default 0
+  // Glow (Bloom)
+  bloomStrength: 0.0,                   // default 0
   bloomThreshold: 0.9,
   bloomRadius: 0.2,
 
-  // Trails / Ghosting
-  trailAmount: 0.0,   // 0..1 (0 = off)
+  // Trails
+  trailAmount: 0.0,                     // 0..1 (0 = off)
 
   // RGB offset
-  rgbAmount: 0.0,     // 0..0.02 typical
-  rgbAngle: 0.0,      // degrees
+  rgbAmount: 0.0,                       // 0..0.02 typical
+  rgbAngle: 0.0,                        // degrees
 
   // View
   exposure: renderer.toneMappingExposure,
-  resetCamera: () => {
-    camera.position.set(3.2, 1.8, 4.8);
-    controls.target.set(0,0,0);
-    controls.update();
-  }
+  resetCamera: () => { camera.position.set(3.0, 1.7, 4.4); controls.target.set(0,0,0); controls.update(); }
 };
 
 const fShape = gui.addFolder('Shape');
@@ -671,80 +524,54 @@ fShape.add(params, 'objectType', {
   'Pentagonal Trapezohedron (10 kites)': 'trapezohedron'
 }).name('Object Type').onChange(v => switchShape(v));
 
-fShape.add(params, 'foldMode', { 'Self-fold (1‑DOF)': 'self-fold', 'Free (multi‑DOF)': 'free' }).name('Fold Mode');
-fShape.add(params, 'foldMinDeg', 0, 89, 0.1).name('Fold Min (°)');
-fShape.add(params, 'foldMaxDeg', 1, 89, 0.1).name('Fold Max (°)');
-
-const fAnim = gui.addFolder('Animation');
+const fAnim = gui.addFolder('Folding');
 fAnim.add(params, 'play').name('Play / Pause');
-fAnim.add(params, 'foldSpeed', 0.0, 3.0, 0.01).name('Fold Speed');
+fAnim.add(params, 'foldSpeed', 0.0, 3.0, 0.01).name('Speed');
+fAnim.add(params, 'foldMin', 0.0, 45.0, 0.1).name('Range Min (°)');
+fAnim.add(params, 'foldMax', 1.0, 60.0, 0.1).name('Range Max (°)');
 
 const fGlow = gui.addFolder('Glow (Bloom)');
-fGlow.add(params, 'bloomStrength', 0.0, 2.5, 0.01).name('Strength').onChange(v => {
-  bloomPass.strength = v;
-  bloomPass.enabled = v > 0.0;
-});
+fGlow.add(params, 'bloomStrength', 0.0, 2.5, 0.01).name('Strength').onChange(v => { bloomPass.strength = v; bloomPass.enabled = v > 0.0; });
 fGlow.add(params, 'bloomThreshold', 0.0, 1.0, 0.001).name('Threshold').onChange(v => bloomPass.threshold = v);
 fGlow.add(params, 'bloomRadius', 0.0, 1.0, 0.001).name('Radius').onChange(v => bloomPass.radius = v);
 
 const fTrail = gui.addFolder('Trails (Ghosting)');
 fTrail.add(params, 'trailAmount', 0.0, 1.0, 0.001).name('Amount').onChange(v => {
-  const damp = 1.0 - v * 0.98; // lower damp -> longer trail
+  const damp = 1.0 - v * 0.98; // lower damp -> longer trails
   afterimagePass.uniforms['damp'].value = damp;
   afterimagePass.enabled = v > 0.0;
 });
 
 const fRGB = gui.addFolder('RGB Offset');
-fRGB.add(params, 'rgbAmount', 0.0, 0.02, 0.0001).name('Amount').onChange(v => {
-  rgbShiftPass.uniforms['amount'].value = v;
-  rgbShiftPass.enabled = v > 0.0;
-});
-fRGB.add(params, 'rgbAngle', 0.0, 180.0, 0.1).name('Angle (°)')
-    .onChange(v => rgbShiftPass.uniforms['angle'].value = THREE.MathUtils.degToRad(v));
+fRGB.add(params, 'rgbAmount', 0.0, 0.02, 0.0001).name('Amount').onChange(v => { rgbShiftPass.uniforms['amount'].value = v; rgbShiftPass.enabled = v > 0.0; });
+fRGB.add(params, 'rgbAngle', 0.0, 180.0, 0.1).name('Angle (°)').onChange(v => { rgbShiftPass.uniforms['angle'].value = THREE.MathUtils.degToRad(v); });
 
 const fView = gui.addFolder('View');
 fView.add(params, 'exposure', 0.6, 1.8, 0.01).name('Exposure').onChange(v => renderer.toneMappingExposure = v);
 fView.add(params, 'resetCamera').name('Reset Camera');
 
-// Optional: expose the surface overlay controls (collapsed by default)
-const surface = { angle: 28, angle2: 82, speed: 0.25, freq1: 6.0, freq2: 9.5, strength: 0.52, triScale: 1.15, warp: 0.55, cellAmp: 0.55, cellFreq: 2.75 };
-const U = () => shape?.mesh.material.userData._overlayUniforms;
-const fSurface = gui.addFolder('Surface (Advanced)');
-fSurface.add(surface, 'angle', 0, 180, 0.1).name('Stripe Angle (°)').onChange(v => { const u = U(); if (u) u.uBandAngle.value  = THREE.MathUtils.degToRad(v); });
-fSurface.add(surface, 'angle2', 0, 180, 0.1).name('Stripe2 Angle (°)').onChange(v => { const u = U(); if (u) u.uBandAngle2.value = THREE.MathUtils.degToRad(v); });
-fSurface.add(surface, 'speed', 0, 2, 0.001).name('Stripe Rot Speed').onChange(v => { const u = U(); if (u) u.uBandSpeed.value = v; });
-fSurface.add(surface, 'freq1', 1, 20, 0.1).name('Stripe Freq 1').onChange(v => { const u = U(); if (u) u.uBandFreq1.value = v; });
-fSurface.add(surface, 'freq2', 1, 20, 0.1).name('Stripe Freq 2').onChange(v => { const u = U(); if (u) u.uBandFreq2.value = v; });
-fSurface.add(surface, 'strength', 0, 1, 0.01).name('Emissive Strength').onChange(v => { const u = U(); if (u) u.uBandStrength.value = v; });
-fSurface.add(surface, 'triScale', 0.2, 4, 0.01).name('Tri-Planar Scale').onChange(v => { const u = U(); if (u) u.uTriScale.value = v; });
-fSurface.add(surface, 'warp', 0, 1.5, 0.01).name('Domain Warp').onChange(v => { const u = U(); if (u) u.uWarp.value = v; });
-fSurface.add(surface, 'cellAmp', 0, 1, 0.01).name('Cellular Mix').onChange(v => { const u = U(); if (u) u.uCellAmp.value = v; });
-fSurface.add(surface, 'cellFreq', 0.5, 8, 0.01).name('Cellular Freq').onChange(v => { const u = U(); if (u) u.uCellFreq.value = v; });
-fSurface.close();
-
-// ---------- Create initial shape ----------
+// ---------- Boot + loop ----------
 switchShape(params.objectType);
 
-// ---------- Render loop ----------
 let t0 = performance.now();
 function animate() {
   requestAnimationFrame(animate);
-  const now = performance.now();
-  const t = (now - t0) / 1000;
+  const t = (performance.now() - t0) / 1000;
 
-  if (params.play && shape) shape.update(t, params.foldSpeed);
+  if (params.play && shape) {
+    const foldRange = { min: THREE.MathUtils.degToRad(params.foldMin), max: THREE.MathUtils.degToRad(params.foldMax) };
+    shape.update(t, params.foldSpeed, foldRange);
+  }
 
   controls.update();
   composer.render();
 }
 animate();
 
-// ---------- Resize handling ----------
+// Resize
 function onResize() {
-  const w = container.clientWidth;
-  const h = container.clientHeight;
-  camera.aspect = w / h;
-  camera.updateProjectionMatrix();
+  const w = container.clientWidth, h = container.clientHeight;
+  camera.aspect = w / h; camera.updateProjectionMatrix();
   renderer.setSize(w, h);
   composer.setSize(w, h);
   bloomPass.setSize(w, h);
