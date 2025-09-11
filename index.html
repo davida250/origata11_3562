@@ -1,12 +1,8 @@
 <!doctype html>
-<!--
-  App shell kept from your original index.html. Provenance:
-  :contentReference[oaicite:0]{index=0}
--->
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Origata v0.47 — Dodecahedron (Origami)</title>
+  <title>Folding Swarm — dynamic edges</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
     :root {
@@ -56,7 +52,7 @@
     }
   </style>
 
-  <!-- Import maps + polyfill so bare specifiers like "three" work in the browser -->
+  <!-- bare imports for three.js -->
   <script async src="https://unpkg.com/es-module-shims@^2/dist/es-module-shims.js"></script>
   <script type="importmap">
   {
@@ -72,10 +68,10 @@
     <div id="scene-container" aria-label="Three.js canvas host"></div>
     <aside id="ui">
       <div class="brand">
-        <b>Endless Fold</b> — default: <b>Dodecahedron</b> • rigid paper hinges<br/>
-        Iridescence + interference bands
+        <b>Folding Swarm</b> — points wander; edges appear when near, drop when far.<br/>
+        Sliders: points • amplitude • frequency • connect / break distances
       </div>
-      <!-- lil-gui attaches here -->
+      <!-- lil-gui mounts here -->
     </aside>
   </div>
 
