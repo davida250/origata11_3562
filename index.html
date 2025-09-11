@@ -1,9 +1,7 @@
 <!doctype html>
 <!--
-  Shell preserved from your original index.html; layout, styles and import map unchanged.  :contentReference[oaicite:0]{index=0}
-  This build keeps all textures/glow/etc. The only big changes are:
-    • Trails are composited so the base image NEVER dims; only echoes fade.
-    • Brownian points initialize near a chosen surface (Sphere/Cube/Torus) with +/- offset.
+  Built on your original shell (layout/import map/styles). Only logic is updated in main.js.
+  (Source reference: original index.html)  :contentReference[oaicite:0]{index=0}
 -->
 <html lang="en">
 <head>
@@ -58,7 +56,7 @@
     }
   </style>
 
-  <!-- Import maps + polyfill so bare specifiers like "three" work in the browser -->
+  <!-- bare imports for three.js -->
   <script async src="https://unpkg.com/es-module-shims@^2/dist/es-module-shims.js"></script>
   <script type="importmap">
   {
@@ -74,9 +72,8 @@
     <div id="scene-container" aria-label="Three.js canvas host"></div>
     <aside id="ui">
       <div class="brand">
-        <b>Endless Fold</b> — Brownian polygons, echo trails (base stays bright), surface‑anchored points
+        <b>Endless Fold</b> — Brownian polygons; echo trails (base stays bright); surface‑anchored points
       </div>
-      <!-- lil-gui attaches here -->
     </aside>
   </div>
 
