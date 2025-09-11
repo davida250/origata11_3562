@@ -1,12 +1,14 @@
 <!doctype html>
 <!--
   Shell preserved from your original index.html; layout, styles and import map unchanged.  :contentReference[oaicite:0]{index=0}
-  Only behavior changes live in main.js (trail blur + luma‑preserving RGB shift).
+  This build keeps all textures/glow/etc. The only big changes are:
+    • Trails are composited so the base image NEVER dims; only echoes fade.
+    • Brownian points initialize near a chosen surface (Sphere/Cube/Torus) with +/- offset.
 -->
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Origata — Brownian Surface + Trails</title>
+  <title>Origata — Brownian Surface + Echo Trails</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
     :root {
@@ -72,7 +74,7 @@
     <div id="scene-container" aria-label="Three.js canvas host"></div>
     <aside id="ui">
       <div class="brand">
-        <b>Endless Fold</b> — Brownian polygons; blur the trails; RGB offset keeps brightness.
+        <b>Endless Fold</b> — Brownian polygons, echo trails (base stays bright), surface‑anchored points
       </div>
       <!-- lil-gui attaches here -->
     </aside>
