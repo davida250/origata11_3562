@@ -1,14 +1,12 @@
 // Origata — Brownian polygon surface + echo trails + luma‑preserving RGB
 // ---------------------------------------------------------------------------------------
-// Key fixes in this build:
-// 1) Echo trails are composited so the current frame never dims; only history fades.
-// 2) The UniformsUtils warning is eliminated by assigning render-target textures to
-//    shader uniforms *after* pass construction (avoid cloning RT textures).
-// 3) Points initialize near a chosen primitive surface (sphere/cube/torus) with ± offset.
-// Everything else (materials, glow, overlay, controls) preserves your original look & flow.
-// (Source reference: original main.js)  :contentReference[oaicite:1]{index=1}
+// Fixes:
+//  • Always-on OutputPass so the pipeline renders even when all effects are off.
+//  • SavePass/Afterimage/TrailComposite only enabled when trails are enabled.
+//  • Assign RT texture to uniforms AFTER pass creation to avoid cloneUniforms warnings.
+// Everything else (materials, overlay, glow, overall look) follows your original stack.  :contentReference[oaicite:1]{index=1}
 
-import * as THREE from 'three';
+import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 
@@ -18,6 +16,7 @@ import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js'
 import { AfterimagePass } from 'three/addons/postprocessing/AfterimagePass.js';
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { SavePass } from 'three/addons/postprocessing/SavePass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 
 import GUI from 'https://cdn.jsdelivr.net/npm/lil-gui@0.20/+esm';
 
@@ -254,7 +253,6 @@ class BrownianSurface {
           case 4: v.set(u, w,  half); n.set(0, 0,  1); break; // +Z
           default:v.set(u, w, -half); n.set(0, 0, -1); break; // -Z
         }
-        // roughly match sphere scale
         v.multiplyScalar(R / (Math.sqrt(3)*half));
       } else if (type === 'torus') {
         const U = Math.random() * Math.PI * 2;
@@ -364,7 +362,7 @@ class BrownianSurface {
   }
 
   update(dt, now) {
-    // Motion (OU-flavored Brownian around surface anchors)
+    // Motion (OU-like around anchors)
     const N = this.N;
     const { amp, freq } = this.params;
     const beta = THREE.MathUtils.clamp(1.2 * freq + 0.2, 0, 12);
@@ -452,6 +450,7 @@ composer.addPass(renderPass);
 // Save the current frame (for trail composition / "base")
 const saveBaseRT = new THREE.WebGLRenderTarget(container.clientWidth, container.clientHeight, { depthBuffer: false, stencilBuffer: false });
 const saveBasePass = new SavePass(saveBaseRT);
+saveBasePass.enabled = false;              // <- only on when trails are enabled
 composer.addPass(saveBasePass);
 
 // Afterimage (temporal accumulator) — not rendered to screen directly
@@ -460,18 +459,17 @@ afterimagePass.enabled = false;
 afterimagePass.uniforms['damp'].value = 0.96;
 composer.addPass(afterimagePass);
 
-// TrailComposite shader: isolate history = afterimage - (1-damp)*base; add to base.
-// NOTE: we deliberately keep base unblurred so it never dims/softens.
+// TrailComposite shader: isolate history = afterimage - (1-damp)*base; add to base (crisp).
 const TrailCompositeShader = {
   uniforms: {
-    tDiffuse:      { value: null }, // afterimage output (set by ShaderPass each frame)
-    tBase:         { value: null }, // assigned AFTER pass creation to avoid cloning RT textures
+    tDiffuse:      { value: null }, // comes from previous pass (afterimage)
+    tBase:         { value: null }, // assigned AFTER pass creation
     uDamp:         { value: afterimagePass.uniforms['damp'].value },
 
     uGain:         { value: 1.0 },
     uGamma:        { value: 1.0 },
     uSaturation:   { value: 1.0 },
-    uBlurPx:       { value: 0.75 }, // blur trails only
+    uBlurPx:       { value: 0.75 },
     uBlurSigma:    { value: 1.0 },
     uInvResolution:{ value: new THREE.Vector2(1/container.clientWidth, 1/container.clientHeight) }
   },
@@ -512,11 +510,11 @@ const TrailCompositeShader = {
     }
 
     void main(){
-      vec3 base     = texture2D(tBase,    vUv).rgb;                       // crisp base
+      vec3 base     = texture2D(tBase,    vUv).rgb;                       // crisp base, never dim/blur
       vec3 afterImg = (uBlurPx > 0.0001) ? blur9(tDiffuse, vUv)
-                                         : texture2D(tDiffuse, vUv).rgb;  // blurred history
+                                         : texture2D(tDiffuse, vUv).rgb;  // blurred history only
 
-      // remove current contribution (1-damp)*base → keep *only* echoes
+      // history ≈ afterimage - (1-damp)*base => current frame removed, only echoes remain
       vec3 history = max(afterImg - (1.0 - uDamp) * base, vec3(0.0));
 
       // tone only on history (echo brightness/shape)
@@ -532,10 +530,8 @@ const TrailCompositeShader = {
 };
 const trailCompositePass = new ShaderPass(TrailCompositeShader);
 trailCompositePass.enabled = false;
+trailCompositePass.uniforms.tBase.value = saveBaseRT.texture; // assign AFTER creation
 composer.addPass(trailCompositePass);
-
-// assign RT texture AFTER pass creation to avoid UniformsUtils cloning warning
-trailCompositePass.uniforms.tBase.value = saveBaseRT.texture;
 
 // Bloom (kept)
 const bloomPass = new UnrealBloomPass(
@@ -583,6 +579,10 @@ const RGBShiftLumaShader = {
 const rgbShiftPass = new ShaderPass(RGBShiftLumaShader);
 rgbShiftPass.enabled = false;
 composer.addPass(rgbShiftPass);
+
+// Always-on final output so the screen is never black
+const outputPass = new OutputPass();
+composer.addPass(outputPass);
 
 // ---------- GUI ----------
 const uiHost = document.getElementById('ui');
@@ -684,7 +684,7 @@ fGlow.add(params, 'bloomRadius', 0.0, 1.0, 0.001).name('Radius').onChange(v => b
 
 // Trails (Echoes)
 const fTrail = gui.addFolder('Trails (Echoes)');
-fTrail.add(params, 'trailEnabled').name('Enable').onChange(() => updateTrailEnabled());
+fTrail.add(params, 'trailEnabled').name('Enable').onChange(updateTrailEnabled);
 fTrail.add(params, 'trailPersistence', 0.0, 99.9, 0.1).name('Persistence (%)');
 fTrail.add(params, 'trailHalfLife', 0.0, 6.0, 0.01).name('Half-life (s)');
 fTrail.add(params, 'trailBlurPx', 0.0, 3.0, 0.01).name('Blur (px)').onChange(updateTrailUniforms);
@@ -704,7 +704,11 @@ fRGB.add(params, 'rgbSpinHz', 0.0, 3.0, 0.001).name('Spin (Hz)');
 fRGB.add(params, 'rgbPulseAmp', 0.0, 0.10, 0.0001).name('Pulse Amp').onChange(updateRGBEnabled);
 fRGB.add(params, 'rgbPulseHz', 0.0, 5.0, 0.001).name('Pulse (Hz)');
 
-// Overlay advanced controls (optional)
+const fView = gui.addFolder('View');
+fView.add(params, 'exposure', 0.6, 1.8, 0.01).name('Exposure').onChange(v => renderer.toneMappingExposure = v);
+fView.add(params, 'resetCamera').name('Reset Camera');
+
+// overlay advanced (optional)
 const surfaceAdv = { angle: 28, angle2: 82, speed: 0.25, freq1: 6.0, freq2: 9.5, strength: 0.52, triScale: 1.15, warp: 0.55, cellAmp: 0.55, cellFreq: 2.75 };
 const U = () => surface?.mesh.material.userData._overlayUniforms;
 const fSurfaceAdv = gui.addFolder('Surface (Advanced)');
@@ -730,8 +734,9 @@ function updateTrailUniforms() {
 }
 function updateTrailEnabled() {
   const enabled = params.trailEnabled;
-  afterimagePass.enabled       = enabled;
-  trailCompositePass.enabled   = enabled;
+  saveBasePass.enabled        = enabled;   // <- crucial: disable when trails are off
+  afterimagePass.enabled      = enabled;
+  trailCompositePass.enabled  = enabled;
   updateTrailUniforms();
 }
 function updateRGBEnabled() {
@@ -767,7 +772,7 @@ function animate() {
       ? Math.exp(-Math.LN2 * Math.max(1e-6, dt) / params.trailHalfLife)
       : THREE.MathUtils.clamp(params.trailPersistence / 100.0, 0.0, 0.9999);
     if (_clearTrailsNext) { damp = 0.0; _clearTrailsNext = false; }
-    damp = Math.min(damp, 0.9999); // below 1.0 so new pixels seep in
+    damp = Math.min(damp, 0.9999);
     afterimagePass.uniforms['damp'].value = damp;
     trailCompositePass.uniforms['uDamp'].value = damp;
   }
