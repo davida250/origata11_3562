@@ -1,15 +1,31 @@
-// Folding Brownian Graph — edges connect/disconnect by distance (with hysteresis).
-// Controls: number of points, movement amplitude, movement frequency,
-//           connect distance (min), break distance (max).
-
+// Origata — Folding Brownian Surface
+// ----------------------------------------------------------------------------
+// Everything (renderer, environment, post, material + overlay shader) is kept
+// from your original main.js. The ONLY change is SHAPE GENERATION: instead of
+// a fixed polyhedron & hinges, we generate polygonal faces dynamically from a
+// set of Brownian-moving points. A face exists when THREE vertices are all
+// mutually within the "connect" distance; it disappears when any pair exceeds
+// the "break" distance (hysteresis). We render ONLY polygonal faces — no lines
+// or single points — so every visible vertex participates in ≥ 1 polygon.
+//
+// Baseline provenance: original structure, shading and FX.  :contentReference[oaicite:1]{index=1}
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { AfterimagePass } from 'three/addons/postprocessing/AfterimagePass.js';
+import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
+import { RGBShiftShader } from 'three/addons/shaders/RGBShiftShader.js';
+
 import GUI from 'https://cdn.jsdelivr.net/npm/lil-gui@0.20/+esm';
 
-// ---------- scene ----------
+// ---------- Scene bootstrap (unchanged) ----------
 const container = document.getElementById('scene-container');
 
-const renderer = new THREE.WebGLRenderer({ antialias: true });
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 renderer.setSize(container.clientWidth, container.clientHeight);
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -20,263 +36,549 @@ container.appendChild(renderer.domElement);
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x000000);
 
-const camera = new THREE.PerspectiveCamera(38, container.clientWidth / container.clientHeight, 0.01, 100);
-camera.position.set(3.2, 2.2, 5.4);
+// Camera + controls
+const camera = new THREE.PerspectiveCamera(36, container.clientWidth / container.clientHeight, 0.01, 100);
+camera.position.set(3.2, 1.8, 4.8);
 
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
 controls.dampingFactor = 0.06;
 controls.minDistance = 2.0;
-controls.maxDistance = 12.0;
+controls.maxDistance = 9.0;
 
-// ---------- helpers ----------
-const tmpV1 = new THREE.Vector3();
-const tmpV2 = new THREE.Vector3();
-const tmpV3 = new THREE.Vector3();
+// Environment (PMREM + RoomEnvironment)
+const pmrem = new THREE.PMREMGenerator(renderer);
+const envRT = pmrem.fromScene(new RoomEnvironment(), 0.04);
+scene.environment = envRT.texture;
 
-function randn() {
-  let u = 0, v = 0;
-  while (u === 0) u = Math.random();
-  while (v === 0) v = Math.random();
-  return Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
-}
-function randn3(out) {
-  out.set(randn(), randn(), randn());
-  return out;
-}
-function randInSphere(radius = 1) {
-  let v = new THREE.Vector3();
-  do {
-    v.set(Math.random()*2-1, Math.random()*2-1, Math.random()*2-1);
-  } while (v.lengthSq() > 1);
-  return v.multiplyScalar(radius);
+// ---------- Surface overlay (identical to original) ----------
+function injectOverlay(material) {
+  const uniforms = {
+    uTime:         { value: 0 },
+    uBandAngle:    { value: THREE.MathUtils.degToRad(28.0) },
+    uBandSpeed:    { value: 0.25 },
+    uBandFreq1:    { value: 6.0 },
+    uBandFreq2:    { value: 9.5 },
+    uBandAngle2:   { value: THREE.MathUtils.degToRad(82.0) },
+    uBandStrength: { value: 0.52 },
+    uTriScale:     { value: 1.15 },
+    uWarp:         { value: 0.55 },
+    uCellAmp:      { value: 0.55 },
+    uCellFreq:     { value: 2.75 }
+  };
+
+  material.onBeforeCompile = (shader) => {
+    Object.assign(shader.uniforms, uniforms);
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', `
+        #include <common>
+        varying vec3 vWorldPos;
+        varying vec3 vWorldNormal;
+      `)
+      .replace('#include <project_vertex>', `
+        #include <project_vertex>
+        vWorldPos = (modelMatrix * vec4(transformed, 1.0)).xyz;
+        vWorldNormal = normalize(mat3(modelMatrix) * normal);
+      `);
+
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <common>', `
+        #include <common>
+        varying vec3 vWorldPos;
+        varying vec3 vWorldNormal;
+        uniform float uTime;
+        uniform float uBandAngle, uBandSpeed, uBandFreq1, uBandFreq2, uBandAngle2, uBandStrength;
+        uniform float uTriScale, uWarp, uCellAmp, uCellFreq;
+
+        float hash12(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7))) * 43758.5453123); }
+        vec2  hash22(vec2 p){
+          p = vec2(dot(p,vec2(127.1,311.7)), dot(p,vec2(269.5,183.3)));
+          return fract(sin(p) * 43758.5453);
+        }
+        float noise(vec2 p){
+          vec2 i = floor(p), f = fract(p);
+          vec2 u = f*f*(3.0-2.0*f);
+          float a = hash12(i + vec2(0,0));
+          float b = hash12(i + vec2(1,0));
+          float c = hash12(i + vec2(0,1));
+          float d = hash12(i + vec2(1,1));
+          return mix(mix(a,b,u.x), mix(c,d,u.x), u.y);
+        }
+        float fbm(vec2 p){
+          float s = 0.0, a = 0.5;
+          for(int i=0;i<5;i++){
+            s += a * noise(p);
+            p = mat2(1.6,1.2,-1.2,1.6) * p;
+            a *= 0.5;
+          }
+          return s;
+        }
+        float cellular(vec2 p){
+          p *= uCellFreq;
+          vec2 i = floor(p), f = fract(p);
+          float md = 1.0;
+          for(int y=-1;y<=1;y++){
+            for(int x=-1;x<=1;x++){
+              vec2 g = vec2(float(x), float(y));
+              vec2 o = hash22(i + g) - 0.5;
+              vec2 r = g + o + (f - 0.5);
+              md = min(md, dot(r,r));
+            }
+          }
+          return sqrt(md);
+        }
+        mat2 rot(float a){ float c = cos(a), s = sin(a); return mat2(c,-s,s,c); }
+        vec3 rainbow(float t){
+          const float TAU = 6.28318530718;
+          vec3 phase = vec3(0.0, 0.33, 0.67) * TAU;
+          return 0.5 + 0.5 * cos(TAU * t + phase);
+        }
+        vec3 triWeights(vec3 n){
+          vec3 an = abs(normalize(n));
+          an = pow(an, vec3(4.0));
+          return an / (an.x + an.y + an.z + 1e-5);
+        }
+        vec3 stripeField(vec2 uv, float baseAngle){
+          float t = uTime;
+          float theta = baseAngle + t * uBandSpeed;
+          mat2 R = rot(theta);
+
+          vec2 w = uv * uTriScale;
+          float w1 = fbm(w * 1.2);
+          w += uWarp * vec2(w1, fbm(w + 17.1));
+
+          float s1 = 0.5 + 0.5 * sin(dot(R * w, vec2(uBandFreq1, 0.0)));
+          float s2 = 0.5 + 0.5 * sin(dot(rot(uBandAngle2) * w, vec2(uBandFreq2, 0.0)));
+          float mixS = max(s1, s2 * 0.85);
+          mixS = mixS * (0.72 + 0.28 * fbm(w * 0.9));
+
+          float cells = 1.0 - smoothstep(0.0, 0.75, cellular(uv));
+          float m = max(mixS, cells * uCellAmp);
+
+          float hueShift = 0.05 * fbm(uv*2.3 + 3.1);
+          vec3 col = rainbow(fract(0.6*m + 0.15*hueShift + 0.03*t));
+          return col * m;
+        }
+      `)
+      .replace('#include <emissivemap_fragment>', `
+        #include <emissivemap_fragment>
+        {
+          vec3 wN = normalize(vWorldNormal);
+          vec3 w = triWeights(wN);
+          vec3 p = vWorldPos;
+
+          vec3 colXY = stripeField(p.xy, uBandAngle);
+          vec3 colXZ = stripeField(p.xz, uBandAngle);
+          vec3 colYZ = stripeField(p.zy, uBandAngle);
+
+          vec3 c = w.x * colYZ + w.y * colXZ + w.z * colXY;
+
+          totalEmissiveRadiance += c * uBandStrength;
+        }
+      `);
+
+    material.userData._overlayUniforms = uniforms;
+  };
+  material.needsUpdate = true;
 }
 
-// ---------- Brownian graph ----------
-class BrownianGraph {
+// ---------------- Brownian polygon surface (new generator) ------------------
+class BrownianSurface {
   constructor(opts) {
     this.params = { ...opts };
-    this.group = new THREE.Group();
-    scene.add(this.group);
 
     this.N = 0;
-    this.pos = null;      // Float32Array (N*3)
-    this.vel = null;      // Float32Array (N*3)
-    this.anc = null;      // Float32Array (N*3)
-    this.state = null;    // Uint8Array (N*N), only j>i used
+    this.pos = null;          // Float32Array (N*3)
+    this.vel = null;          // Float32Array (N*3)
+    this.anc = null;          // Float32Array (N*3)
+    this.state = null;        // Uint8Array (N*N) symmetrical; 1=connected, 0=not
 
-    this.maxEdges = 0;
-    this.pointsMesh = null;
-    this.linesMesh = null;
-    this.linesGeom = null;
+    this.tris = [];           // Array of [i,j,k] with i<j<k
+    this._geomMap = null;     // Int32Array of length tris*3, mapping each tri-vertex -> point index
+
+    // Mesh (keeps all previous material + overlay)
+    const mat = new THREE.MeshPhysicalMaterial({
+      color: 0x151515,
+      roughness: 0.26,
+      metalness: 0.0,
+      envMapIntensity: 1.2,
+      iridescence: 1.0,
+      iridescenceIOR: 1.3,
+      iridescenceThicknessRange: [120, 620],
+      flatShading: true,
+      side: THREE.DoubleSide
+    });
+    injectOverlay(mat);
+
+    this.geometry = new THREE.BufferGeometry(); // starts empty; will be rebuilt as topology changes
+    this.geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(0), 3));
+    this.geometry.setAttribute('normal',   new THREE.BufferAttribute(new Float32Array(0), 3));
+    this.mesh = new THREE.Mesh(this.geometry, mat);
+
+    this.group = new THREE.Group();
+    this.group.add(this.mesh);
+    scene.add(this.group);
 
     this.setCount(this.params.count);
   }
 
+  // re/initialize particle set
   setCount(n) {
-    n = Math.max(2, Math.floor(n));
-
-    if (this.pointsMesh) {
-      this.group.remove(this.pointsMesh);
-      this.pointsMesh.geometry.dispose();
-      this.pointsMesh.material.dispose();
-      this.pointsMesh = null;
-    }
-    if (this.linesMesh) {
-      this.group.remove(this.linesMesh);
-      this.linesGeom.dispose();
-      this.linesMesh.material.dispose();
-      this.linesMesh = null;
-      this.linesGeom = null;
-    }
+    n = Math.max(3, Math.floor(n));
 
     this.N = n;
     this.pos = new Float32Array(n * 3);
     this.vel = new Float32Array(n * 3);
     this.anc = new Float32Array(n * 3);
-    this.state = new Uint8Array(n * n); // 0/1 connection state
+    this.state = new Uint8Array(n * n);
 
-    // anchors & initial positions
+    // deterministic-ish distribution inside a ball
     const R = 1.6;
     for (let i = 0; i < n; i++) {
       const a = randInSphere(R);
-      const p = a.clone().add(randInSphere(0.1));
-      this.anc[i*3+0] = a.x; this.anc[i*3+1] = a.y; this.anc[i*3+2] = a.z;
-      this.pos[i*3+0] = p.x; this.pos[i*3+1] = p.y; this.pos[i*3+2] = p.z;
-      this.vel[i*3+0] = 0;   this.vel[i*3+1] = 0;   this.vel[i*3+2] = 0;
+      const p = a.clone().add(randInSphere(0.12));
+      const o = i * 3;
+      this.anc[o+0] = a.x; this.anc[o+1] = a.y; this.anc[o+2] = a.z;
+      this.pos[o+0] = p.x; this.pos[o+1] = p.y; this.pos[o+2] = p.z;
+      this.vel[o+0] = 0;   this.vel[o+1] = 0;   this.vel[o+2] = 0;
     }
 
-    // points cloud
-    const pg = new THREE.BufferGeometry();
-    pg.setAttribute('position', new THREE.BufferAttribute(this.pos, 3));
-    const pm = new THREE.PointsMaterial({
-      color: 0xffffff,
-      size: 0.035,
-      sizeAttenuation: true,
-      transparent: true,
-      opacity: 0.95
-    });
-    this.pointsMesh = new THREE.Points(pg, pm);
-    this.group.add(this.pointsMesh);
-
-    // lines capacity
-    this.maxEdges = n * (n - 1) / 2;
-    const linePos = new Float32Array(this.maxEdges * 2 * 3);
-    const lineCol = new Float32Array(this.maxEdges * 2 * 3);
-
-    this.linesGeom = new THREE.BufferGeometry();
-    this.linesGeom.setAttribute('position', new THREE.BufferAttribute(linePos, 3));
-    this.linesGeom.setAttribute('color',    new THREE.BufferAttribute(lineCol, 3));
-    this.linesGeom.setDrawRange(0, 0);
-
-    const lm = new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.95 });
-    this.linesMesh = new THREE.LineSegments(this.linesGeom, lm);
-    this.group.add(this.linesMesh);
+    this._rebuildFromTriangles([]); // empty to start
   }
 
-  // i<j mapping
-  _idx(i, j) { return i * this.N + j; }
-
-  update(dt) {
-    const N = this.N;
-    const { amp, freq, connectDist, breakDist } = this.params;
-
-    // OU-like motion around anchor -> "Brownian" vibe, bounded.
-    const beta = THREE.MathUtils.clamp(1.2 * freq, 0.0, 10.0);  // velocity damping
-    const k    = THREE.MathUtils.clamp(1.5 * freq, 0.0, 12.0);  // spring to anchor
-    const sigma = amp * (0.8 + 0.4 * Math.random());            // noise intensity (jitter)
-    const sqrtDt = Math.sqrt(Math.max(1e-6, dt));
-    const n3 = new THREE.Vector3();
-
+  // Build triangle list from current adjacency: a triangle exists iff all three edges are ON.
+  _computeTriangles() {
+    const N = this.N, S = this.state;
+    const tris = [];
+    // neighbor lists to prune search
+    const neigh = Array.from({ length: N }, () => []);
     for (let i = 0; i < N; i++) {
-      const ix = i*3;
-      // read
-      const px = this.pos[ix+0], py = this.pos[ix+1], pz = this.pos[ix+2];
-      let vx = this.vel[ix+0], vy = this.vel[ix+1], vz = this.vel[ix+2];
-      const ax = this.anc[ix+0], ay = this.anc[ix+1], az = this.anc[ix+2];
-
-      // forces
-      const toAnchorX = ax - px, toAnchorY = ay - py, toAnchorZ = az - pz;
-
-      randn3(n3).multiplyScalar(sigma * sqrtDt); // stochastic kick
-      vx += (-beta * vx + k * toAnchorX) * dt + n3.x;
-      vy += (-beta * vy + k * toAnchorY) * dt + n3.y;
-      vz += (-beta * vz + k * toAnchorZ) * dt + n3.z;
-
-      // integrate & light boundary push (keep things visible)
-      let nx = px + vx * dt, ny = py + vy * dt, nz = pz + vz * dt;
-      const r = Math.sqrt(nx*nx + ny*ny + nz*nz);
-      const limit = 2.2;
-      if (r > limit) {
-        const s = (limit / r);
-        nx *= s; ny *= s; nz *= s;
-        vx *= 0.6; vy *= 0.6; vz *= 0.6;
+      for (let j = i + 1; j < N; j++) {
+        if (S[i * N + j] === 1) {
+          neigh[i].push(j);
+          neigh[j].push(i);
+        }
       }
+    }
+    for (let i = 0; i < N; i++) {
+      const Ni = neigh[i]; // all j connected with i
+      for (let a = 0; a < Ni.length; a++) {
+        const j = Ni[a];
+        if (j <= i) continue;
+        const Nj = neigh[j];
+        // intersect Ni (after j) with Nj to find k > j such that i-j, i-k, j-k all on
+        for (let b = a + 1; b < Ni.length; b++) {
+          const k = Ni[b];
+          if (k <= j) continue;
+          if (S[j * N + k] === 1) {
+            tris.push([i, j, k]);
+          }
+        }
+      }
+    }
+    return tris;
+  }
 
-      // write
-      this.pos[ix+0] = nx; this.pos[ix+1] = ny; this.pos[ix+2] = nz;
-      this.vel[ix+0] = vx; this.vel[ix+1] = vy; this.vel[ix+2] = vz;
+  _rebuildFromTriangles(tris) {
+    this.tris = tris;
+    const triCount = tris.length;
+
+    const positions = new Float32Array(triCount * 3 * 3);
+    const normals   = new Float32Array(triCount * 3 * 3);
+    this._geomMap   = new Int32Array(triCount * 3);
+
+    // map tri-vertices to particle indices
+    for (let t = 0; t < triCount; t++) {
+      const base = t * 3;
+      const [i, j, k] = tris[t];
+      this._geomMap[base + 0] = i;
+      this._geomMap[base + 1] = j;
+      this._geomMap[base + 2] = k;
     }
 
-    // connections (hysteresis)
-    const onR  = connectDist;
-    const offR = Math.max(breakDist, onR + 1e-6);
+    this.geometry.dispose();
+    this.geometry = new THREE.BufferGeometry();
+    this.geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    this.geometry.setAttribute('normal',   new THREE.BufferAttribute(normals,   3));
+    this.geometry.setIndex([...Array(triCount * 3).keys()]);
+    this.geometry.computeBoundingSphere();
 
-    let eCount = 0;
+    this.mesh.geometry = this.geometry;
+  }
+
+  _updatePositionsAndNormals() {
+    const posAttr = this.geometry.getAttribute('position');
+    const nrmAttr = this.geometry.getAttribute('normal');
+    if (!posAttr || !nrmAttr) return;
+
     const P = this.pos;
-    const linePos = this.linesGeom.getAttribute('position').array;
-    const lineCol = this.linesGeom.getAttribute('color').array;
+    const arr = posAttr.array;
+    const nArr = nrmAttr.array;
+
+    // write positions
+    for (let v = 0; v < this._geomMap.length; v++) {
+      const pi = this._geomMap[v] * 3;
+      const w  = v * 3;
+      arr[w+0] = P[pi+0];
+      arr[w+1] = P[pi+1];
+      arr[w+2] = P[pi+2];
+    }
+    posAttr.needsUpdate = true;
+
+    // flat normals (per-triangle)
+    const triCount = this._geomMap.length / 3;
+    const v0 = new THREE.Vector3(), v1 = new THREE.Vector3(), v2 = new THREE.Vector3();
+    const e1 = new THREE.Vector3(), e2 = new THREE.Vector3(), n  = new THREE.Vector3();
+    for (let t = 0; t < triCount; t++) {
+      const i0 = (t * 3 + 0) * 3;
+      const i1 = (t * 3 + 1) * 3;
+      const i2 = (t * 3 + 2) * 3;
+      v0.set(arr[i0], arr[i0+1], arr[i0+2]);
+      v1.set(arr[i1], arr[i1+1], arr[i1+2]);
+      v2.set(arr[i2], arr[i2+1], arr[i2+2]);
+      e1.subVectors(v1, v0);
+      e2.subVectors(v2, v0);
+      n.copy(e1).cross(e2).normalize();
+      nArr[i0] = nArr[i1] = nArr[i2] = n.x;
+      nArr[i0+1] = nArr[i1+1] = nArr[i2+1] = n.y;
+      nArr[i0+2] = nArr[i1+2] = nArr[i2+2] = n.z;
+    }
+    nrmAttr.needsUpdate = true;
+  }
+
+  update(dt, now) {
+    // 1) Brownian-like motion around anchors (Ornstein–Uhlenbeck flavor)
+    const N = this.N;
+    const { amp, freq } = this.params;
+    const beta = THREE.MathUtils.clamp(1.2 * freq + 0.2, 0, 12);  // damping
+    const k    = THREE.MathUtils.clamp(1.6 * freq + 0.3, 0, 14);  // spring to anchor
+    const sigma = amp;                                            // noise amplitude
+    const sqrtDt = Math.sqrt(Math.max(1e-6, dt));
 
     for (let i = 0; i < N; i++) {
-      const ix = i*3;
-      const pix = P[ix+0], piy = P[ix+1], piz = P[ix+2];
-      for (let j = i+1; j < N; j++) {
-        const jx = j*3;
-        const pjx = P[jx+0], pjy = P[jx+1], pjz = P[jx+2];
+      const o = i * 3;
+      // noise kick
+      const nx = randn() * sigma * sqrtDt;
+      const ny = randn() * sigma * sqrtDt;
+      const nz = randn() * sigma * sqrtDt;
 
+      // forces: -beta*v + k*(a - p) + noise
+      const px = this.pos[o+0], py = this.pos[o+1], pz = this.pos[o+2];
+      let vx = this.vel[o+0], vy = this.vel[o+1], vz = this.vel[o+2];
+      const ax = this.anc[o+0], ay = this.anc[o+1], az = this.anc[o+2];
+
+      vx += (-beta * vx + k * (ax - px)) * dt + nx;
+      vy += (-beta * vy + k * (ay - py)) * dt + ny;
+      vz += (-beta * vz + k * (az - pz)) * dt + nz;
+
+      this.vel[o+0] = vx; this.vel[o+1] = vy; this.vel[o+2] = vz;
+
+      let nxp = px + vx * dt, nyp = py + vy * dt, nzp = pz + vz * dt;
+
+      // soft boundary (keep within a presentation sphere)
+      const r = Math.hypot(nxp, nyp, nzp), limit = 2.25;
+      if (r > limit) {
+        const s = limit / r;
+        nxp *= s; nyp *= s; nzp *= s;
+        this.vel[o+0] *= 0.65; this.vel[o+1] *= 0.65; this.vel[o+2] *= 0.65;
+      }
+
+      this.pos[o+0] = nxp; this.pos[o+1] = nyp; this.pos[o+2] = nzp;
+    }
+
+    // 2) Update adjacency with hysteresis
+    const onR  = this.params.connectDist;
+    const offR = Math.max(this.params.breakDist, onR + 1e-4);
+
+    const S = this.state;
+    for (let i = 0; i < N; i++) {
+      const ix = i * 3;
+      const pix = this.pos[ix], piy = this.pos[ix+1], piz = this.pos[ix+2];
+      for (let j = i + 1; j < N; j++) {
+        const jx = j * 3;
+        const pjx = this.pos[jx], pjy = this.pos[jx+1], pjz = this.pos[jx+2];
         const dx = pjx - pix, dy = pjy - piy, dz = pjz - piz;
-        const d2 = dx*dx + dy*dy + dz*dz;
-        const d  = Math.sqrt(d2);
+        const d = Math.sqrt(dx*dx + dy*dy + dz*dz);
 
-        const k = this._idx(i, j);
-        const isOn = this.state[k] === 1;
-        if (!isOn && d <= onR) this.state[k] = 1;
-        else if (isOn && d >= offR) this.state[k] = 0;
+        const idx = i * N + j;
+        const on = S[idx] === 1;
 
-        if (this.state[k] === 1) {
-          // pack into line buffer
-          const base = eCount * 2 * 3;
-
-          linePos[base+0] = pix; linePos[base+1] = piy; linePos[base+2] = piz;
-          linePos[base+3] = pjx; linePos[base+4] = pjy; linePos[base+5] = pjz;
-
-          // color by tension (near-on distance is bright)
-          const t = THREE.MathUtils.clamp(1.0 - (d - onR) / (offR - onR), 0.0, 1.0);
-          const c0 = 0.35 + 0.65 * t;
-          const r = 0.85 * t + 0.15, g = 0.95 * c0, b = 1.0; // soft iridescent bias
-
-          lineCol[base+0] = r; lineCol[base+1] = g; lineCol[base+2] = b;
-          lineCol[base+3] = r; lineCol[base+4] = g; lineCol[base+5] = b;
-
-          eCount++;
+        if (!on && d <= onR) {
+          S[i * N + j] = 1; S[j * N + i] = 1;
+        } else if (on && d >= offR) {
+          S[i * N + j] = 0; S[j * N + i] = 0;
         }
       }
     }
 
-    this.linesGeom.setDrawRange(0, eCount * 2);
-    this.linesGeom.getAttribute('position').needsUpdate = true;
-    this.linesGeom.getAttribute('color').needsUpdate = true;
+    // 3) Triangles from 3‑cliques of the current proximity graph
+    const tris = this._computeTriangles();
 
-    // points update
-    this.pointsMesh.geometry.attributes.position.needsUpdate = true;
+    // 4) Rebuild geometry if triangle count changed
+    if (tris.length * 3 !== (this._geomMap ? this._geomMap.length : 0)) {
+      this._rebuildFromTriangles(tris);
+    } else {
+      this.tris = tris; // same count, topology may differ but capacity matches
+      // remap indices (cheap)
+      for (let t = 0; t < tris.length; t++) {
+        const [i, j, k] = tris[t];
+        const base = t * 3;
+        this._geomMap[base + 0] = i;
+        this._geomMap[base + 1] = j;
+        this._geomMap[base + 2] = k;
+      }
+    }
+
+    // 5) Write triangle vertex positions and flat normals
+    if (this._geomMap.length > 0) this._updatePositionsAndNormals();
+
+    // 6) Drive shader time and gentle global rotation (presentation)
+    const uniforms = this.mesh.material.userData._overlayUniforms;
+    if (uniforms) uniforms.uTime.value = now;
+
+    const yaw   = 0.22 * Math.sin(2 * Math.PI * 0.03 * now);
+    const pitch = 0.17 * Math.sin(2 * Math.PI * 0.021 * now + 1.2);
+    this.group.rotation.set(pitch, yaw, 0, 'YXZ');
   }
 }
 
-// ---------- gui ----------
+// ---------- utilities ----------
+function randInSphere(r=1) {
+  const v = new THREE.Vector3();
+  do { v.set(Math.random()*2-1, Math.random()*2-1, Math.random()*2-1); }
+  while (v.lengthSq() > 1);
+  return v.multiplyScalar(r);
+}
+function randn() { // Gaussian (Box–Muller)
+  let u = 0, v = 0;
+  while (u === 0) u = Math.random();
+  while (v === 0) v = Math.random();
+  return Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+}
+
+// ---------- Post-processing pipeline (unchanged) ----------
+const composer = new EffectComposer(renderer);
+composer.addPass(new RenderPass(scene, camera));
+
+// Trails (Afterimage)
+const afterimagePass = new AfterimagePass();
+afterimagePass.enabled = false;
+afterimagePass.uniforms['damp'].value = 1.0;
+composer.addPass(afterimagePass);
+
+// Glow / Bloom
+const bloomPass = new UnrealBloomPass(
+  new THREE.Vector2(container.clientWidth, container.clientHeight),
+  0.0,
+  0.2,
+  0.9
+);
+bloomPass.enabled = false;
+composer.addPass(bloomPass);
+
+// RGB offset
+const rgbShiftPass = new ShaderPass(RGBShiftShader);
+rgbShiftPass.enabled = false;
+rgbShiftPass.uniforms['amount'].value = 0.0;
+rgbShiftPass.uniforms['angle'].value  = 0.0;
+composer.addPass(rgbShiftPass);
+
+// ---------- GUI (kept; only "shape" removed, and Brownian controls added) ----------
 const uiHost = document.getElementById('ui');
 const gui = new GUI({ title: 'Controls', width: 320 });
 uiHost.appendChild(gui.domElement);
 
 const params = {
-  count:       28,     // number of points
-  amp:         0.75,   // movement amplitude (noise strength)
-  freq:        0.8,    // movement frequency (jitter bandwidth)
-  connectDist: 0.70,   // connect when distance <= this
-  breakDist:   0.95,   // break when distance >= this
-  play:        true,
-  reseed: () => {
-    graph.setCount(graph.N); // re-anchor & reset states
-  },
+  // Brownian surface controls
+  count:        36,     // number of vertices simulated
+  amp:          0.85,   // movement amplitude (noise power)
+  freq:         0.9,    // movement frequency (stiffness/damping)
+  connectDist:  0.78,   // triangle edges appear when d <= this
+  breakDist:    0.98,   // triangles disappear when any edge d >= this
+  play:         true,
+  timeScale:    1.0,
+
+  // FX (identical behavior)
+  bloomStrength: 0.0,
+  bloomThreshold: 0.9,
+  bloomRadius:   0.2,
+  trailAmount:   0.0,
+  rgbAmount:     0.0,
+  rgbAngle:      0.0,
+  exposure:      renderer.toneMappingExposure,
+
+  reseed: () => surface.setCount(surface.N),
   resetCamera: () => {
-    camera.position.set(3.2, 2.2, 5.4);
+    camera.position.set(3.2, 1.8, 4.8);
     controls.target.set(0,0,0);
     controls.update();
   }
 };
 
-const fSystem = gui.addFolder('System');
-fSystem.add(params, 'count', 4, 160, 1).name('Points').onFinishChange(v => { graph.setCount(v); });
-fSystem.add(params, 'amp', 0.0, 2.0, 0.001).name('Amplitude').onChange(v => { graph.params.amp = v; });
-fSystem.add(params, 'freq', 0.0, 3.0, 0.001).name('Frequency').onChange(v => { graph.params.freq = v; });
-fSystem.add(params, 'connectDist', 0.05, 2.0, 0.001).name('Connect (≤)').onChange(v => {
-  graph.params.connectDist = v;
-  if (params.breakDist < v) { params.breakDist = v; graph.params.breakDist = v; gui.updateDisplay(); }
+const fSys = gui.addFolder('Brownian Surface');
+fSys.add(params, 'count', 4, 200, 1).name('Vertices').onFinishChange(v => { surface.setCount(v); });
+fSys.add(params, 'amp', 0.0, 2.0, 0.001).name('Amplitude').onChange(v => surface.params.amp = v);
+fSys.add(params, 'freq', 0.0, 3.0, 0.001).name('Frequency').onChange(v => surface.params.freq = v);
+fSys.add(params, 'connectDist', 0.05, 2.0, 0.001).name('Connect (≤)').onChange(v => {
+  surface.params.connectDist = v;
+  if (params.breakDist < v) { params.breakDist = v; surface.params.breakDist = v; gui.updateDisplay(); }
 });
-fSystem.add(params, 'breakDist', 0.05, 2.0, 0.001).name('Break (≥)').onChange(v => {
-  graph.params.breakDist = Math.max(v, params.connectDist);
-  params.breakDist = graph.params.breakDist;
+fSys.add(params, 'breakDist', 0.05, 2.0, 0.001).name('Break (≥)').onChange(v => {
+  surface.params.breakDist = Math.max(v, params.connectDist);
+  params.breakDist = surface.params.breakDist;
   gui.updateDisplay();
 });
-fSystem.add(params, 'reseed').name('Reseed');
+fSys.add(params, 'reseed').name('Reseed');
+
+const fAnim = gui.addFolder('Animation');
+fAnim.add(params, 'play').name('Play / Pause');
+fAnim.add(params, 'timeScale', 0.0, 3.0, 0.01).name('Time Scale');
+
+const fGlow = gui.addFolder('Glow (Bloom)');
+fGlow.add(params, 'bloomStrength', 0.0, 2.5, 0.01).name('Strength').onChange(v => {
+  bloomPass.strength = v;
+  bloomPass.enabled = v > 0.0;
+});
+fGlow.add(params, 'bloomThreshold', 0.0, 1.0, 0.001).name('Threshold').onChange(v => bloomPass.threshold = v);
+fGlow.add(params, 'bloomRadius', 0.0, 1.0, 0.001).name('Radius').onChange(v => bloomPass.radius = v);
+
+const fTrail = gui.addFolder('Trails (Ghosting)');
+fTrail.add(params, 'trailAmount', 0.0, 1.0, 0.001).name('Amount').onChange(v => {
+  const damp = 1.0 - v * 0.98;
+  afterimagePass.uniforms['damp'].value = damp;
+  afterimagePass.enabled = v > 0.0;
+});
+
+const fRGB = gui.addFolder('RGB Offset');
+fRGB.add(params, 'rgbAmount', 0.0, 0.02, 0.0001).name('Amount').onChange(v => {
+  rgbShiftPass.uniforms['amount'].value = v;
+  rgbShiftPass.enabled = v > 0.0;
+});
+fRGB.add(params, 'rgbAngle', 0.0, 180.0, 0.1).name('Angle (°)')
+    .onChange(v => rgbShiftPass.uniforms['angle'].value = THREE.MathUtils.degToRad(v));
 
 const fView = gui.addFolder('View');
-fView.add(params, 'play').name('Play / Pause');
-fView.add({ exposure: renderer.toneMappingExposure }, 'exposure', 0.6, 1.8, 0.01).name('Exposure')
-     .onChange(v => renderer.toneMappingExposure = v);
+fView.add(params, 'exposure', 0.6, 1.8, 0.01).name('Exposure').onChange(v => renderer.toneMappingExposure = v);
 fView.add(params, 'resetCamera').name('Reset Camera');
 
-// ---------- graph instance ----------
-const graph = new BrownianGraph({
+// Optional: same advanced surface controls (overlay)
+const surfaceAdv = { angle: 28, angle2: 82, speed: 0.25, freq1: 6.0, freq2: 9.5, strength: 0.52, triScale: 1.15, warp: 0.55, cellAmp: 0.55, cellFreq: 2.75 };
+const U = () => surface?.mesh.material.userData._overlayUniforms;
+const fSurface = gui.addFolder('Surface (Advanced)');
+fSurface.add(surfaceAdv, 'angle', 0, 180, 0.1).name('Stripe Angle (°)').onChange(v => { const u = U(); if (u) u.uBandAngle.value  = THREE.MathUtils.degToRad(v); });
+fSurface.add(surfaceAdv, 'angle2', 0, 180, 0.1).name('Stripe2 Angle (°)').onChange(v => { const u = U(); if (u) u.uBandAngle2.value = THREE.MathUtils.degToRad(v); });
+fSurface.add(surfaceAdv, 'speed', 0, 2, 0.001).name('Stripe Rot Speed').onChange(v => { const u = U(); if (u) u.uBandSpeed.value = v; });
+fSurface.add(surfaceAdv, 'freq1', 1, 20, 0.1).name('Stripe Freq 1').onChange(v => { const u = U(); if (u) u.uBandFreq1.value = v; });
+fSurface.add(surfaceAdv, 'freq2', 1, 20, 0.1).name('Stripe Freq 2').onChange(v => { const u = U(); if (u) u.uBandFreq2.value = v; });
+fSurface.add(surfaceAdv, 'strength', 0, 1, 0.01).name('Emissive Strength').onChange(v => { const u = U(); if (u) u.uBandStrength.value = v; });
+fSurface.add(surfaceAdv, 'triScale', 0.2, 4, 0.01).name('Tri-Planar Scale').onChange(v => { const u = U(); if (u) u.uTriScale.value = v; });
+fSurface.add(surfaceAdv, 'warp', 0, 1.5, 0.01).name('Domain Warp').onChange(v => { const u = U(); if (u) u.uWarp.value = v; });
+fSurface.add(surfaceAdv, 'cellAmp', 0, 1, 0.01).name('Cellular Mix').onChange(v => { const u = U(); if (u) u.uCellAmp.value = v; });
+fSurface.add(surfaceAdv, 'cellFreq', 0.5, 8, 0.01).name('Cellular Freq').onChange(v => { const u = U(); if (u) u.uCellFreq.value = v; });
+fSurface.close();
+
+// ---------- Create surface ----------
+const surface = new BrownianSurface({
   count: params.count,
   amp: params.amp,
   freq: params.freq,
@@ -284,37 +586,39 @@ const graph = new BrownianGraph({
   breakDist: params.breakDist
 });
 
-// ---------- loop ----------
-let last = performance.now();
+// ---------- Render loop ----------
+let tPrev = performance.now();
 function animate() {
   requestAnimationFrame(animate);
   const now = performance.now();
-  let dt = (now - last) / 1000;
-  last = now;
+  let dt = (now - tPrev) / 1000;
+  tPrev = now;
 
-  // clamp dt for stability
-  dt = Math.min(dt, 1/30);
+  // clamp and scale time step
+  dt = Math.min(dt, 1/30) * params.timeScale;
 
   if (params.play) {
-    graph.params.amp = params.amp;
-    graph.params.freq = params.freq;
-    graph.params.connectDist = params.connectDist;
-    graph.params.breakDist = params.breakDist;
-    graph.update(dt);
+    surface.params.amp         = params.amp;
+    surface.params.freq        = params.freq;
+    surface.params.connectDist = params.connectDist;
+    surface.params.breakDist   = params.breakDist;
+    surface.update(dt, (now) / 1000);
   }
 
   controls.update();
-  renderer.render(scene, camera);
+  composer.render();
 }
 animate();
 
-// ---------- resize ----------
+// ---------- Resize handling (unchanged) ----------
 function onResize() {
   const w = container.clientWidth;
   const h = container.clientHeight;
   camera.aspect = w / h;
   camera.updateProjectionMatrix();
   renderer.setSize(w, h);
+  composer.setSize(w, h);
+  bloomPass.setSize(w, h);
 }
 window.addEventListener('resize', onResize);
 new ResizeObserver(onResize).observe(container);
