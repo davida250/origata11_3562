@@ -1,13 +1,12 @@
 <!doctype html>
 <!--
-  Shell kept the same as your original index.html (styles, layout, import map).
-  Only the SHAPE GENERATION changed (see main.js). Everything else — material,
-  iridescent shader overlay, bloom/trails/RGB post — remains identical.  :contentReference[oaicite:0]{index=0}
+  Shell preserved from your original index.html; UI + import map unchanged.  :contentReference[oaicite:0]{index=0}
+  Only behavior changes live in main.js (expanded trails + RGB controls).
 -->
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Origata — Folding Brownian Surface</title>
+  <title>Origata — Brownian Surface + Trails</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
     :root {
@@ -73,9 +72,9 @@
     <div id="scene-container" aria-label="Three.js canvas host"></div>
     <aside id="ui">
       <div class="brand">
-        <b>Endless Fold</b> — Brownian vertices • faces appear when triplets are close<br/>
-        Iridescence + bloom/trails/RGB exactly as before
+        <b>Endless Fold</b> — Brownian polygons; trails & RGB offset expanded.
       </div>
+      <!-- lil-gui attaches here -->
     </aside>
   </div>
 
