@@ -1,28 +1,19 @@
-// Endless Folding Polyhedra — Dodecahedron-first (Origami-style)
-// Full replacement for your prior main.js. Baseline provenance: :contentReference[oaicite:1]{index=1}
-//
-// Fixes the crash you hit:
-//   • Robust dodecahedron builder that works with BOTH indexed and non-indexed BufferGeometry.
-//   • Global vertex welding by quantized position → correct face adjacency even without shared indices.
-//
-// Origami feel:
-//   • Faces are rigid; hinges are pinned along shared edges; edges are welded every frame.
-//   • Coordinated “self-fold” (1‑DOF) mode mirrors top/bottom hinge groups; also has “free” mode.
+// Folding Swarm — points with smooth Brownian motion; proximity-based edges
+// Full file (drop-in). Keeps the iridescent interference look on camera-facing "paper" ribbons.
+// Controls: number of points, amplitude, frequency, connect (on) distance, break (off) distance.
 
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
-
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { AfterimagePass } from 'three/addons/postprocessing/AfterimagePass.js';
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { RGBShiftShader } from 'three/addons/shaders/RGBShiftShader.js';
-
 import GUI from 'https://cdn.jsdelivr.net/npm/lil-gui@0.20/+esm';
 
-// ---------- Scene bootstrap ----------
+// ---------- scene bootstrap ----------
 const container = document.getElementById('scene-container');
 
 const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
@@ -36,7 +27,6 @@ container.appendChild(renderer.domElement);
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x000000);
 
-// Camera + controls
 const camera = new THREE.PerspectiveCamera(36, container.clientWidth / container.clientHeight, 0.01, 100);
 camera.position.set(3.0, 1.9, 5.0);
 
@@ -46,687 +36,341 @@ controls.dampingFactor = 0.06;
 controls.minDistance = 2.0;
 controls.maxDistance = 9.0;
 
-// Environment (PMREM + RoomEnvironment)
+// soft environment
 const pmrem = new THREE.PMREMGenerator(renderer);
 const envRT = pmrem.fromScene(new RoomEnvironment(), 0.04);
 scene.environment = envRT.texture;
 
-// ---------- Generic Rigid Hinge Mesh ----------
-class RigidHingeMesh {
-  /**
-   * @param {Object} spec
-   *   spec.faces: Array<{ rest: THREE.Vector3[], tag?: string }>
-   *   spec.hinges: Array<{ child:number, parent:number, parentEdge:[number,number], childEdge:[number,number], ampDeg:number, freq:number, phase:number, group?:'top'|'bottom' }>
-   *   spec.material?: THREE.Material
-   */
-  constructor(spec) {
+// ---------- utilities ----------
+const tmpV1 = new THREE.Vector3();
+const tmpV2 = new THREE.Vector3();
+const tmpV3 = new THREE.Vector3();
+const tmpM  = new THREE.Matrix4();
+const tmpS  = new THREE.Vector3();
+const randInSphere = (r=1) => {
+  let v = new THREE.Vector3();
+  do {
+    v.set(Math.random()*2-1, Math.random()*2-1, Math.random()*2-1);
+  } while (v.lengthSq() > 1);
+  return v.multiplyScalar(r);
+};
+
+// ---------- Iridescent + interference overlay (for meshes) ----------
+function injectSurfaceOverlay(material) {
+  const uniforms = {
+    uTime:         { value: 0 },
+    uBandAngle:    { value: THREE.MathUtils.degToRad(28.0) },
+    uBandSpeed:    { value: 0.25 },
+    uBandFreq1:    { value: 6.0 },
+    uBandFreq2:    { value: 9.5 },
+    uBandAngle2:   { value: THREE.MathUtils.degToRad(82.0) },
+    uBandStrength: { value: 0.52 },
+    uTriScale:     { value: 1.15 },
+    uWarp:         { value: 0.55 },
+    uCellAmp:      { value: 0.55 },
+    uCellFreq:     { value: 2.75 }
+  };
+
+  material.onBeforeCompile = (shader) => {
+    Object.assign(shader.uniforms, uniforms);
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', `
+        #include <common>
+        varying vec3 vWorldPos;
+        varying vec3 vWorldNormal;
+      `)
+      .replace('#include <project_vertex>', `
+        #include <project_vertex>
+        vWorldPos = (modelMatrix * vec4(transformed, 1.0)).xyz;
+        vWorldNormal = normalize(mat3(modelMatrix) * normal);
+      `);
+
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <common>', `
+        #include <common>
+        varying vec3 vWorldPos;
+        varying vec3 vWorldNormal;
+        uniform float uTime;
+        uniform float uBandAngle, uBandSpeed, uBandFreq1, uBandFreq2, uBandAngle2, uBandStrength;
+        uniform float uTriScale, uWarp, uCellAmp, uCellFreq;
+
+        float hash12(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7))) * 43758.5453123); }
+        vec2  hash22(vec2 p){
+          p = vec2(dot(p,vec2(127.1,311.7)), dot(p,vec2(269.5,183.3)));
+          return fract(sin(p) * 43758.5453);
+        }
+        float noise(vec2 p){
+          vec2 i = floor(p), f = fract(p);
+          vec2 u = f*f*(3.0-2.0*f);
+          float a = hash12(i + vec2(0,0));
+          float b = hash12(i + vec2(1,0));
+          float c = hash12(i + vec2(0,1));
+          float d = hash12(i + vec2(1,1));
+          return mix(mix(a,b,u.x), mix(c,d,u.x), u.y);
+        }
+        float fbm(vec2 p){
+          float s = 0.0, a = 0.5;
+          for(int i=0;i<5;i++){
+            s += a * noise(p);
+            p = mat2(1.6,1.2,-1.2,1.6) * p;
+            a *= 0.5;
+          }
+          return s;
+        }
+        float cellular(vec2 p){
+          p *= uCellFreq;
+          vec2 i = floor(p), f = fract(p);
+          float md = 1.0;
+          for(int y=-1;y<=1;y++){
+            for(int x=-1;x<=1;x++){
+              vec2 g = vec2(float(x), float(y));
+              vec2 o = hash22(i + g) - 0.5;
+              vec2 r = g + o + (f - 0.5);
+              md = min(md, dot(r,r));
+            }
+          }
+          return sqrt(md);
+        }
+        mat2 rot(float a){ float c = cos(a), s = sin(a); return mat2(c,-s,s,c); }
+        vec3 rainbow(float t){
+          const float TAU = 6.28318530718;
+          vec3 phase = vec3(0.0, 0.33, 0.67) * TAU;
+          return 0.5 + 0.5 * cos(TAU * t + phase);
+        }
+        vec3 triWeights(vec3 n){
+          vec3 an = abs(normalize(n));
+          an = pow(an, vec3(4.0));
+          return an / (an.x + an.y + an.z + 1e-5);
+        }
+        vec3 stripeField(vec2 uv, float baseAngle){
+          float t = uTime;
+          float theta = baseAngle + t * uBandSpeed;
+          mat2 R = rot(theta);
+
+          vec2 w = uv * uTriScale;
+          float w1 = fbm(w * 1.2);
+          w += uWarp * vec2(w1, fbm(w + 17.1));
+
+          float s1 = 0.5 + 0.5 * sin(dot(R * w, vec2(uBandFreq1, 0.0)));
+          float s2 = 0.5 + 0.5 * sin(dot(rot(uBandAngle2) * w, vec2(uBandFreq2, 0.0)));
+          float mixS = max(s1, s2 * 0.85);
+          mixS = mixS * (0.72 + 0.28 * fbm(w * 0.9));
+
+          float cells = 1.0 - smoothstep(0.0, 0.75, cellular(uv));
+          float m = max(mixS, cells * uCellAmp);
+
+          float hueShift = 0.05 * fbm(uv*2.3 + 3.1);
+          vec3 col = rainbow(fract(0.6*m + 0.15*hueShift + 0.03*t));
+          return col * m;
+        }
+      `)
+      .replace('#include <emissivemap_fragment>', `
+        #include <emissivemap_fragment>
+        {
+          vec3 wN = normalize(vWorldNormal);
+          vec3 w = triWeights(wN);
+          vec3 p = vWorldPos;
+
+          vec3 colXY = stripeField(p.xy, uBandAngle);
+          vec3 colXZ = stripeField(p.xz, uBandAngle);
+          vec3 colYZ = stripeField(p.zy, uBandAngle);
+
+          vec3 c = w.x * colYZ + w.y * colXZ + w.z * colXY;
+          totalEmissiveRadiance += c * uBandStrength;
+        }
+      `);
+
+    material.userData._overlayUniforms = uniforms;
+  };
+  material.needsUpdate = true;
+}
+
+// ---------- Folding Swarm ----------
+class FoldingSwarm {
+  constructor(opts) {
+    this.params = opts;
     this.group = new THREE.Group();
+    scene.add(this.group);
 
-    this.faces = spec.faces.map((f, id) => ({
-      id,
-      tag: f.tag || '',
-      rest: f.rest.map(v => v.clone()),
-      world: f.rest.map(v => v.clone()),
-      parent: null,
-      hinge: null
-    }));
+    this.N = 0;
+    this.points = [];
+    this.conn = null; // adjacency (upper triangle indices)
+    this.maxEdges = 0;
 
-    // Triangulate each face with a fan; record mapping geoVertex -> (face, local-index)
-    this._geomMap = [];
-    const tris = [];
-    for (let fi = 0; fi < this.faces.length; fi++) {
-      const m = this.faces[fi].rest.length;
-      for (let k = 1; k < m - 1; k++) {
-        tris.push([[fi, 0], [fi, k], [fi, k + 1]]);
-        this._geomMap.push({ face: fi, local: 0 });
-        this._geomMap.push({ face: fi, local: k });
-        this._geomMap.push({ face: fi, local: k + 1 });
-      }
+    // geometries
+    this.pointsGeom = null;
+    this.pointsMesh = null;
+    this.ribbonMesh = null;
+
+    this.reseed();
+    this.setCount(opts.count);
+  }
+
+  reseed() {
+    this.seed = Math.random() * 1e9;
+    // nothing else needed (using Math.random) — this knob lets user "reseed" positions/goals
+  }
+
+  setCount(n) {
+    n = Math.max(2, Math.floor(n));
+    // dispose old meshes
+    if (this.pointsMesh) { this.group.remove(this.pointsMesh); this.pointsMesh.geometry.dispose(); this.pointsMesh.material.dispose(); this.pointsMesh = null; }
+    if (this.ribbonMesh) { this.group.remove(this.ribbonMesh); this.ribbonMesh.geometry.dispose(); this.ribbonMesh.material.dispose(); this.ribbonMesh = null; }
+
+    this.N = n;
+    this.points = [];
+    const radius = 1.4;
+    for (let i = 0; i < n; i++) {
+      const anchor = randInSphere(radius);
+      const pos = anchor.clone();
+      const vel = new THREE.Vector3();
+      const goal = randInSphere(1.0);
+      const nextT = 0; // force immediate goal pick
+      this.points.push({ anchor, pos, vel, goal, nextT });
     }
 
-    // Geometry
-    const triCount = tris.length;
-    const positions = new Float32Array(triCount * 3 * 3);
-    const normals   = new Float32Array(triCount * 3 * 3);
-    const geometry  = new THREE.BufferGeometry();
-    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-    geometry.setAttribute('normal',   new THREE.BufferAttribute(normals,   3));
-    geometry.setIndex([...Array(triCount * 3).keys()]);
-    geometry.computeBoundingSphere();
+    // adjacency + capacity
+    this.conn = new Uint8Array(n * n); // we will read only j>i
+    this.maxEdges = n * (n - 1) / 2;
 
-    // Material (physical with iridescence); overlay added later
-    const mat = (spec.material instanceof THREE.Material) ? spec.material : new THREE.MeshPhysicalMaterial({
-      color: 0x151515,
-      roughness: 0.26,
+    // points cloud
+    this.pointsGeom = new THREE.BufferGeometry();
+    const pos = new Float32Array(n * 3);
+    this.pointsGeom.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    const pmat = new THREE.PointsMaterial({
+      color: 0xffffff,
+      size: 0.03,
+      sizeAttenuation: true,
+      transparent: true,
+      opacity: 0.95
+    });
+    this.pointsMesh = new THREE.Points(this.pointsGeom, pmat);
+    this.group.add(this.pointsMesh);
+
+    // ribbons: camera-facing quads (instanced)
+    const plane = new THREE.PlaneGeometry(1, 1, 1, 1);
+    const rmat = new THREE.MeshPhysicalMaterial({
+      color: 0x141414,
+      roughness: 0.25,
       metalness: 0.0,
       envMapIntensity: 1.2,
-      iridescence: 1.0,
-      iridescenceIOR: 1.3,
-      iridescenceThicknessRange: [120, 620],
+      side: THREE.DoubleSide,
       flatShading: true
     });
+    injectSurfaceOverlay(rmat);
 
-    this._injectOverlay(mat);
-
-    const mesh = new THREE.Mesh(geometry, mat);
-    mesh.castShadow = mesh.receiveShadow = false;
-    this.group.add(mesh);
-
-    this.mesh = mesh;
-    this.geometry = geometry;
-    this.triCount = triCount;
-
-    // Working matrices
-    this._M = this.faces.map(() => new THREE.Matrix4());
-    this._mTA = new THREE.Matrix4();
-    this._mTNegA = new THREE.Matrix4();
-    this._mRot = new THREE.Matrix4();
-
-    // Attach hinges
-    const hinges = spec.hinges || [];
-    for (const h of hinges) this._bindHinge(h);
-
-    // Parent-before-child traversal
-    this.faceOrder = this._topoOrder();
-
-    this.update(0, 1.0);
+    this.ribbonMesh = new THREE.InstancedMesh(plane, rmat, this.maxEdges);
+    this.ribbonMesh.count = 0;
+    this.group.add(this.ribbonMesh);
   }
 
-  dispose() {
-    this.geometry.dispose();
-    if (this.mesh.material) this.mesh.material.dispose();
+  // upper-triangular index helper
+  _I(i, j) {
+    return i * this.N + j; // we always store j>i
   }
 
-  // ---------- Overlay (tri-planar, domain-warped interference + cellular) ----------
-  _injectOverlay(material) {
-    const uniforms = {
-      uTime:         { value: 0 },
-      uBandAngle:    { value: THREE.MathUtils.degToRad(28.0) },
-      uBandSpeed:    { value: 0.25 },
-      uBandFreq1:    { value: 6.0 },
-      uBandFreq2:    { value: 9.5 },
-      uBandAngle2:   { value: THREE.MathUtils.degToRad(82.0) },
-      uBandStrength: { value: 0.52 },
-      uTriScale:     { value: 1.15 },
-      uWarp:         { value: 0.55 },
-      uCellAmp:      { value: 0.55 },
-      uCellFreq:     { value: 2.75 }
-    };
+  _updateGoals(now) {
+    const f = this.params.freq; // Hz
+    const amp = this.params.amp; // world units
+    // choose a fresh random target (goal) every ~1/f seconds per point
+    const meanInterval = (f > 0) ? (1.0 / f) : Infinity;
 
-    material.onBeforeCompile = (shader) => {
-      Object.assign(shader.uniforms, uniforms);
-      shader.vertexShader = shader.vertexShader
-        .replace('#include <common>', `
-          #include <common>
-          varying vec3 vWorldPos;
-          varying vec3 vWorldNormal;
-        `)
-        .replace('#include <project_vertex>', `
-          #include <project_vertex>
-          vWorldPos = (modelMatrix * vec4(transformed, 1.0)).xyz;
-          vWorldNormal = normalize(mat3(modelMatrix) * normal);
-        `);
+    for (let i = 0; i < this.N; i++) {
+      const p = this.points[i];
+      if (now >= p.nextT) {
+        p.goal.copy(randInSphere(1.0)).multiplyScalar(amp);
+        // next goal time with slight jitter (so not all switch at once)
+        const jitter = THREE.MathUtils.lerp(0.6, 1.4, Math.random());
+        p.nextT = now + (meanInterval === Infinity ? Infinity : meanInterval * jitter);
+      }
+    }
+  }
 
-      shader.fragmentShader = shader.fragmentShader
-        .replace('#include <common>', `
-          #include <common>
-          varying vec3 vWorldPos;
-          varying vec3 vWorldNormal;
-          uniform float uTime;
-          uniform float uBandAngle, uBandSpeed, uBandFreq1, uBandFreq2, uBandAngle2, uBandStrength;
-          uniform float uTriScale, uWarp, uCellAmp, uCellFreq;
+  update(dt, now) {
+    // 1) motion (smooth random — spring-damper to a wandering goal around the anchor)
+    this._updateGoals(now);
+    const spring = 6.0 * Math.max(0.02, this.params.freq);  // pull toward goal scales with freq (snappier for higher)
+    const damp   = 0.9;                                      // velocity damping per second
+    const visc   = Math.pow(1.0 - (1.0 - damp), dt);         // exp-like decay
 
-          float hash12(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7))) * 43758.5453123); }
-          vec2  hash22(vec2 p){
-            p = vec2(dot(p,vec2(127.1,311.7)), dot(p,vec2(269.5,183.3)));
-            return fract(sin(p) * 43758.5453);
-          }
-          float noise(vec2 p){
-            vec2 i = floor(p), f = fract(p);
-            vec2 u = f*f*(3.0-2.0*f);
-            float a = hash12(i + vec2(0,0));
-            float b = hash12(i + vec2(1,0));
-            float c = hash12(i + vec2(0,1));
-            float d = hash12(i + vec2(1,1));
-            return mix(mix(a,b,u.x), mix(c,d,u.x), u.y);
-          }
-          float fbm(vec2 p){
-            float s = 0.0, a = 0.5;
-            for(int i=0;i<5;i++){
-              s += a * noise(p);
-              p = mat2(1.6,1.2,-1.2,1.6) * p;
-              a *= 0.5;
+    for (let i = 0; i < this.N; i++) {
+      const p = this.points[i];
+      const target = tmpV1.copy(p.anchor).add(p.goal); // anchor + goal offset
+      const toT = tmpV2.copy(target).sub(p.pos);
+      // spring acceleration
+      p.vel.addScaledVector(toT, spring * dt);
+      // tiny random jiggle (keeps it lively)
+      p.vel.addScaledVector(randInSphere(0.02), Math.min(1, this.params.freq * 0.2) * dt);
+      // damping
+      p.vel.multiplyScalar(visc);
+      // integrate
+      p.pos.addScaledVector(p.vel, dt);
+    }
+
+    // 2) connections (with hysteresis)
+    const connectAt = this.params.connectDist; // on ≤
+    const breakAt   = Math.max(this.params.breakDist, connectAt + 1e-4); // off ≥
+    const width     = this.params.ribbonWidth;
+
+    let eCount = 0;
+    const view = camera.getWorldDirection(tmpV3).negate(); // approx. eye->scene
+    const minLen = 1e-6;
+
+    for (let i = 0; i < this.N; i++) {
+      const pi = this.points[i].pos;
+      for (let j = i + 1; j < this.N; j++) {
+        const pj = this.points[j].pos;
+        const d = pi.distanceTo(pj);
+        const k = this._I(i, j);
+        const isOn = this.conn[k] === 1;
+
+        if (!isOn && d <= connectAt) this.conn[k] = 1;
+        else if (isOn && d >= breakAt) this.conn[k] = 0;
+
+        if (this.conn[k] === 1) {
+          // instance transform for ribbon i-j
+          tmpV1.subVectors(pj, pi);               // dir * length
+          const L = tmpV1.length();
+          if (L > minLen) {
+            const dir = tmpV1.multiplyScalar(1 / L);        // normalize
+            // camera-facing "billboard" around the edge: Y is perpendicular to view and dir
+            const y = tmpV2.crossVectors(view, dir);
+            if (y.lengthSq() < 1e-8) { // handle near-parallel cases
+              y.set(0, 1, 0).cross(dir).normalize();
+            } else {
+              y.normalize();
             }
-            return s;
+            const z = tmpV3.crossVectors(dir, y).normalize();
+
+            tmpM.makeBasis(dir, y, z);                       // X=dir, Y=billboard up, Z=normal
+            tmpS.set(L, width, 1.0);
+            tmpM.scale(tmpS);
+            tmpM.setPosition(tmpV1.copy(pi).add(pj).multiplyScalar(0.5));
+
+            this.ribbonMesh.setMatrixAt(eCount++, tmpM);
           }
-          float cellular(vec2 p){
-            p *= uCellFreq;
-            vec2 i = floor(p), f = fract(p);
-            float md = 1.0;
-            for(int y=-1;y<=1;y++){
-              for(int x=-1;x<=1;x++){
-                vec2 g = vec2(float(x), float(y));
-                vec2 o = hash22(i + g) - 0.5;
-                vec2 r = g + o + (f - 0.5);
-                md = min(md, dot(r,r));
-              }
-            }
-            return sqrt(md);
-          }
-          mat2 rot(float a){ float c = cos(a), s = sin(a); return mat2(c,-s,s,c); }
-          vec3 rainbow(float t){
-            const float TAU = 6.28318530718;
-            vec3 phase = vec3(0.0, 0.33, 0.67) * TAU;
-            return 0.5 + 0.5 * cos(TAU * t + phase);
-          }
-          vec3 triWeights(vec3 n){
-            vec3 an = abs(normalize(n));
-            an = pow(an, vec3(4.0));
-            return an / (an.x + an.y + an.z + 1e-5);
-          }
-          vec3 stripeField(vec2 uv, float baseAngle){
-            float t = uTime;
-            float theta = baseAngle + t * uBandSpeed;
-            mat2 R = rot(theta);
-
-            vec2 w = uv * uTriScale;
-            float w1 = fbm(w * 1.2);
-            w += uWarp * vec2(w1, fbm(w + 17.1));
-
-            float s1 = 0.5 + 0.5 * sin(dot(R * w, vec2(uBandFreq1, 0.0)));
-            float s2 = 0.5 + 0.5 * sin(dot(rot(uBandAngle2) * w, vec2(uBandFreq2, 0.0)));
-            float mixS = max(s1, s2 * 0.85);
-            mixS = mixS * (0.72 + 0.28 * fbm(w * 0.9));
-
-            float cells = 1.0 - smoothstep(0.0, 0.75, cellular(uv));
-            float m = max(mixS, cells * uCellAmp);
-
-            float hueShift = 0.05 * fbm(uv*2.3 + 3.1);
-            vec3 col = rainbow(fract(0.6*m + 0.15*hueShift + 0.03*t));
-            return col * m;
-          }
-        `)
-        .replace('#include <emissivemap_fragment>', `
-          #include <emissivemap_fragment>
-          {
-            vec3 wN = normalize(vWorldNormal);
-            vec3 w = triWeights(wN);
-            vec3 p = vWorldPos;
-
-            vec3 colXY = stripeField(p.xy, uBandAngle);
-            vec3 colXZ = stripeField(p.xz, uBandAngle);
-            vec3 colYZ = stripeField(p.zy, uBandAngle);
-
-            vec3 c = w.x * colYZ + w.y * colXZ + w.z * colXY;
-
-            totalEmissiveRadiance += c * uBandStrength;
-          }
-        `);
-
-      material.userData._overlayUniforms = uniforms;
-    };
-    material.needsUpdate = true;
-  }
-
-  _pickThirdIndex(face, i, j) {
-    const m = face.rest.length;
-    for (let k = 0; k < m; k++) if (k !== i && k !== j) return k;
-    return 0;
-  }
-
-  _bindHinge(h) {
-    const child  = this.faces[h.child];
-    const parent = this.faces[h.parent];
-
-    const pA = parent.rest[h.parentEdge[0]].clone();
-    const pB = parent.rest[h.parentEdge[1]].clone();
-    const pT = parent.rest[this._pickThirdIndex(parent, h.parentEdge[0], h.parentEdge[1])].clone();
-
-    const cA = child.rest[h.childEdge[0]].clone();
-    const cB = child.rest[h.childEdge[1]].clone();
-    const cT = child.rest[this._pickThirdIndex(child, h.childEdge[0], h.childEdge[1])].clone();
-
-    const up = new THREE.Vector3().subVectors(pB, pA).normalize();
-    const uc = new THREE.Vector3().subVectors(cB, cA).normalize();
-
-    const q1 = new THREE.Quaternion().setFromUnitVectors(uc, up);
-
-    const nP = new THREE.Vector3().subVectors(pB, pA).cross(new THREE.Vector3().subVectors(pT, pA)).normalize();
-    const nC1 = new THREE.Vector3().subVectors(cB, cA).cross(new THREE.Vector3().subVectors(cT, cA)).applyQuaternion(q1).normalize();
-
-    const proj = (n, axis) => n.clone().sub(axis.clone().multiplyScalar(n.dot(axis)));
-    const nPp = proj(nP, up).normalize();
-    const nCp = proj(nC1, up).normalize();
-
-    const cross = new THREE.Vector3().crossVectors(nCp, nPp);
-    const phi = Math.atan2(up.dot(cross), nCp.dot(nPp));
-    const q2 = new THREE.Quaternion().setFromAxisAngle(up, phi);
-    const q  = q2.multiply(q1);
-
-    const pos = pA.clone().sub(cA.clone().applyQuaternion(q));
-    const bind = new THREE.Matrix4().compose(pos, q, new THREE.Vector3(1,1,1));
-
-    child.parent = h.parent;
-    child.hinge  = {
-      parent: h.parent,
-      parentEdge: h.parentEdge.slice(0),
-      childEdge:  h.childEdge.slice(0),
-      amp: THREE.MathUtils.degToRad(h.ampDeg ?? 36),
-      freq: h.freq ?? 0.12,
-      phase: h.phase ?? 0.0,
-      group: h.group ?? 'top',
-      bind
-    };
-  }
-
-  _topoOrder() {
-    const order = [];
-    const visited = new Array(this.faces.length).fill(false);
-    const dfs = (i) => {
-      visited[i] = true;
-      for (let j = 0; j < this.faces.length; j++) {
-        if (!visited[j] && this.faces[j].parent === i) dfs(j);
-      }
-      order.push(i);
-    };
-    for (let i = 0; i < this.faces.length; i++) if (this.faces[i].parent === null) dfs(i);
-    return order.reverse();
-  }
-
-  _composePinned(Mparent, parentFace, hinge, angle, outM) {
-    const Arest = parentFace.rest[hinge.parentEdge[0]].clone();
-    const Brest = parentFace.rest[hinge.parentEdge[1]].clone();
-
-    const Aw = Arest.clone().applyMatrix4(Mparent);
-    const Bw = Brest.clone().applyMatrix4(Mparent);
-
-    const axis = new THREE.Vector3().subVectors(Bw, Aw).normalize();
-
-    this._mTA.makeTranslation(Aw.x, Aw.y, Aw.z);
-    this._mTNegA.makeTranslation(-Aw.x, -Aw.y, -Aw.z);
-    this._mRot.makeRotationAxis(axis, angle);
-
-    outM.copy(Mparent)
-        .multiply(this._mTA)
-        .multiply(this._mRot)
-        .multiply(this._mTNegA)
-        .multiply(hinge.bind);
-  }
-
-  update(t, speed = 1.0) {
-    const ease = (x) => x*x*(3 - 2*x);
-    const q01 = 0.5 + 0.5 * Math.sin(2 * Math.PI * (0.10 * speed) * t);
-    const s   = ease(q01);
-    const aMin = THREE.MathUtils.degToRad(params.foldMinDeg);
-    const aMax = THREE.MathUtils.degToRad(params.foldMaxDeg);
-    const alpha = THREE.MathUtils.lerp(aMin, aMax, s);
-    const beta  = -alpha;
-    const q = (f, p) => Math.sin(2 * Math.PI * (f * speed) * t + p);
-
-    for (let i = 0; i < this._M.length; i++) this._M[i].identity();
-
-    for (let i = 0; i < this.faceOrder.length; i++) {
-      const id = this.faceOrder[i];
-      const f  = this.faces[id];
-      if (!f.hinge) continue;
-
-      const h = f.hinge;
-      const Mparent = this._M[h.parent];
-
-      let angle;
-      if (params.foldMode === 'self-fold') {
-        const g = h.group || 'top';
-        angle = (g === 'bottom') ? beta : alpha;
-      } else {
-        angle = h.amp * q(h.freq, h.phase) + 0.10 * Math.sin(2 * Math.PI * (0.05 * speed) * t + id);
-      }
-
-      this._composePinned(Mparent, this.faces[h.parent], h, angle, this._M[id]);
-    }
-
-    // Gentle presentation rotation
-    const yaw   = 0.22 * Math.sin(2 * Math.PI * 0.03 * t);
-    const pitch = 0.17 * Math.sin(2 * Math.PI * 0.021 * t + 1.2);
-    const Mglobal = new THREE.Matrix4().makeRotationFromEuler(new THREE.Euler(pitch, yaw, 0, 'YXZ'));
-
-    // Pass 1: transform face vertices
-    for (let i = 0; i < this.faces.length; i++) {
-      const M = new THREE.Matrix4().multiplyMatrices(Mglobal, this._M[i]);
-      const fr = this.faces[i].rest;
-      for (let k = 0; k < fr.length; k++) {
-        this.faces[i].world[k].copy(fr[k]).applyMatrix4(M);
+        }
       }
     }
 
-    // Pass 2: weld hinge vertices from parent to child
-    for (let i = 0; i < this.faces.length; i++) {
-      const f = this.faces[i];
-      if (!f.hinge) continue;
-      const h = f.hinge;
-      const parent = this.faces[h.parent];
+    this.ribbonMesh.count = eCount;
+    this.ribbonMesh.instanceMatrix.needsUpdate = true;
 
-      const pA = parent.world[h.parentEdge[0]];
-      const pB = parent.world[h.parentEdge[1]];
-
-      f.world[h.childEdge[0]].copy(pA);
-      f.world[h.childEdge[1]].copy(pB);
-    }
-
-    // Pass 3: write positions
-    const posAttr = this.geometry.getAttribute('position');
-    for (let gv = 0; gv < this._geomMap.length; gv++) {
-      const m = this._geomMap[gv];
-      const w = this.faces[m.face].world[m.local];
-      posAttr.setXYZ(gv, w.x, w.y, w.z);
+    // 3) write points positions
+    const posAttr = this.pointsGeom.getAttribute('position');
+    for (let i = 0; i < this.N; i++) {
+      const p = this.points[i].pos;
+      posAttr.setXYZ(i, p.x, p.y, p.z);
     }
     posAttr.needsUpdate = true;
 
-    // Pass 4: recompute flat normals
-    const nrmAttr = this.geometry.getAttribute('normal');
-    const arr = posAttr.array;
-    const nArr = nrmAttr.array;
-    const v0 = new THREE.Vector3(), v1 = new THREE.Vector3(), v2 = new THREE.Vector3();
-    const e1 = new THREE.Vector3(), e2 = new THREE.Vector3(), n  = new THREE.Vector3();
-    for (let tIdx = 0; tIdx < this.triCount; tIdx++) {
-      const i0 = (tIdx * 3 + 0) * 3;
-      const i1 = (tIdx * 3 + 1) * 3;
-      const i2 = (tIdx * 3 + 2) * 3;
-      v0.set(arr[i0], arr[i0+1], arr[i0+2]);
-      v1.set(arr[i1], arr[i1+1], arr[i1+2]);
-      v2.set(arr[i2], arr[i2+1], arr[i2+2]);
-      e1.subVectors(v1, v0);
-      e2.subVectors(v2, v0);
-      n.copy(e1).cross(e2).normalize();
-      nArr[i0] = nArr[i1] = nArr[i2] = n.x;
-      nArr[i0+1] = nArr[i1+1] = nArr[i2+1] = n.y;
-      nArr[i0+2] = nArr[i1+2] = nArr[i2+2] = n.z;
-    }
-    nrmAttr.needsUpdate = true;
-
-    const uniforms = this.mesh.material.userData._overlayUniforms;
-    if (uniforms) uniforms.uTime.value = t;
+    // 4) drive overlay time (for ribbons)
+    const u = this.ribbonMesh.material.userData._overlayUniforms;
+    if (u) u.uTime.value = now;
   }
 }
 
-// ---------- Dodecahedron builder (indexed & non-indexed safe) ----------
-function buildDodecahedronSpec() {
-  // Base geometry: triangles (from PolyhedronGeometry). We will cluster triangles into 12 pentagons.
-  const g = new THREE.DodecahedronGeometry(1.0, 0);
-
-  const posAttr = g.getAttribute('position');
-  if (!posAttr) throw new Error('DodecahedronGeometry has no position attribute.');
-  const posArr = posAttr.array;
-  const getV = (i) => new THREE.Vector3(posArr[i*3], posArr[i*3+1], posArr[i*3+2]);
-
-  // If non-indexed, synthesize a sequential index [0..count-1]
-  const idxAttr = g.getIndex();
-  const indices = idxAttr ? Array.from(idxAttr.array) : Array.from({ length: posAttr.count }, (_, i) => i);
-
-  // Global vertex welding by quantized world position (handles non-indexed duplicates)
-  const qn = (x, q=1e5) => Math.round(x * q) / q;
-  const weldMap = new Map();  // key -> welded index
-  const weldPos = [];         // welded index -> Vector3
-  const vertexToWeld = new Array(posAttr.count);
-  for (let i = 0; i < posAttr.count; i++) {
-    const v = getV(i);
-    const key = `${qn(v.x)},${qn(v.y)},${qn(v.z)}`;
-    let wi = weldMap.get(key);
-    if (wi === undefined) {
-      wi = weldPos.length;
-      weldMap.set(key, wi);
-      weldPos.push(v.clone());
-    }
-    vertexToWeld[i] = wi;
-  }
-
-  // Group triangles by plane (normal + d), with canonical outward orientation
-  const clusters = new Map(); // key -> { normal, tris: [[i0,i1,i2],...], welds:Set(), verts:Set() }
-  const planeKey = (n, d) => `${qn(n.x)},${qn(n.y)},${qn(n.z)}|${qn(d)}`;
-
-  for (let t = 0; t < indices.length; t += 3) {
-    const i0 = indices[t], i1 = indices[t+1], i2 = indices[t+2];
-    const p0 = getV(i0), p1 = getV(i1), p2 = getV(i2);
-
-    const n = new THREE.Vector3().subVectors(p1, p0).cross(new THREE.Vector3().subVectors(p2, p0));
-    const area2 = n.length();
-    if (area2 === 0) continue;
-    n.normalize();
-
-    // Canonical outward orientation: flip so that normal points roughly away from origin
-    const triC = new THREE.Vector3().addVectors(p0, p1).add(p2).multiplyScalar(1/3);
-    if (n.dot(triC) < 0) n.multiplyScalar(-1);
-
-    const d = -n.dot(p0);
-    const key = planeKey(n, d);
-
-    if (!clusters.has(key)) clusters.set(key, { normal: n.clone(), tris: [], welds: new Set(), verts: new Set(), centroid: new THREE.Vector3() });
-    const c = clusters.get(key);
-    c.tris.push([i0, i1, i2]);
-    c.verts.add(i0); c.verts.add(i1); c.verts.add(i2);
-    c.welds.add(vertexToWeld[i0]); c.welds.add(vertexToWeld[i1]); c.welds.add(vertexToWeld[i2]);
-    c.centroid.add(triC);
-  }
-
-  // Build 12 pentagonal faces (ordered CCW)
-  const faces = [];
-  const faceWeldIdx = []; // per-face welded indices in CCW order
-  const faceCenters = [];
-  const scale = 1.15;
-
-  for (const c of clusters.values()) {
-    const uniqWeld = Array.from(c.welds);
-    if (uniqWeld.length !== 5) continue; // only accept pentagonal planes
-
-    // Order the 5 welded vertices CCW in the plane
-    const n = c.normal.clone().normalize();
-    const centroid = uniqWeld
-      .map(wi => weldPos[wi])
-      .reduce((acc, v) => acc.add(v), new THREE.Vector3())
-      .multiplyScalar(1 / uniqWeld.length);
-
-    const ref = (Math.abs(n.y) < 0.99) ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(1, 0, 0);
-    const u = new THREE.Vector3().crossVectors(ref, n).normalize();
-    const v = new THREE.Vector3().crossVectors(n, u);
-
-    const orderedWeld = uniqWeld
-      .map((wi) => {
-        const p = weldPos[wi];
-        const r = p.clone().sub(centroid);
-        const ang = Math.atan2(r.dot(v), r.dot(u));
-        return { wi, ang };
-      })
-      .sort((a, b) => a.ang - b.ang)
-      .map(o => o.wi);
-
-    const faceVerts = orderedWeld.map(wi => weldPos[wi].clone().multiplyScalar(scale));
-    faces.push({ rest: faceVerts, tag: 'D' });
-    faceWeldIdx.push(orderedWeld);
-    faceCenters.push(centroid.clone().multiplyScalar(scale));
-  }
-
-  // Build adjacency via shared welded edges
-  const edgeMap = new Map(); // "min|max" -> [{face, local:[i,i+1], weld:[a,b]}...]
-  for (let f = 0; f < faceWeldIdx.length; f++) {
-    const order = faceWeldIdx[f];
-    const m = order.length;
-    for (let k = 0; k < m; k++) {
-      const a = order[k], b = order[(k + 1) % m];
-      const key = (a < b) ? `${a}|${b}` : `${b}|${a}`;
-      if (!edgeMap.has(key)) edgeMap.set(key, []);
-      edgeMap.get(key).push({ face: f, local: [k, (k + 1) % m], weld: [a, b] });
-    }
-  }
-
-  // Neighbor lists
-  const neighbors = Array.from({ length: faces.length }, () => []);
-  for (const list of edgeMap.values()) {
-    if (list.length === 2) {
-      const A = list[0], B = list[1];
-      neighbors[A.face].push({ other: B.face, parentEdge: A.local, childLocal: B.local, wParent: A.weld, wChild: B.weld });
-      neighbors[B.face].push({ other: A.face, parentEdge: B.local, childLocal: A.local, wParent: B.weld, wChild: A.weld });
-    }
-  }
-
-  // Root: face with highest center.y
-  let root = 0, maxY = -Infinity;
-  for (let i = 0; i < faceCenters.length; i++) {
-    const y = faceCenters[i].y;
-    if (y > maxY) { maxY = y; root = i; }
-  }
-
-  // BFS spanning tree → hinges
-  const visited = new Array(faces.length).fill(false);
-  const depth   = new Array(faces.length).fill(0);
-  const hinges = [];
-
-  const queue = [root];
-  visited[root] = true;
-  depth[root] = 0;
-
-  while (queue.length) {
-    const parent = queue.shift();
-    for (const link of neighbors[parent]) {
-      const child = link.other;
-      if (visited[child]) continue;
-
-      // Orient child's edge to match parent's welded order
-      const [pa, pb] = link.wParent;
-      const [ca, cb] = link.wChild;
-      const childEdge = (ca === pa && cb === pb)
-        ? [link.childLocal[0], link.childLocal[1]]
-        : [link.childLocal[1], link.childLocal[0]];
-
-      const group = (depth[parent] % 2 === 0) ? 'top' : 'bottom';
-      hinges.push({
-        child,
-        parent,
-        parentEdge: [link.parentEdge[0], link.parentEdge[1]],
-        childEdge,
-        group,
-        ampDeg: 40,
-        freq: 0.12 + 0.02 * (child % 3),
-        phase: 0.5 * (1 + (child % 5))
-      });
-
-      visited[child] = true;
-      depth[child] = depth[parent] + 1;
-      queue.push(child);
-    }
-  }
-
-  return { faces, hinges };
-}
-
-// ---------- Other Shape builders (optional for selector) ----------
-function buildPentagonalDipyramidSpec() {
-  const R = 1.05, H = 1.10, jitter = 0.025;
-  const top = new THREE.Vector3(0,  H, 0);
-  const bot = new THREE.Vector3(0, -H, 0);
-  const ring = [];
-  for (let i = 0; i < 5; i++) {
-    const a = (i / 5) * Math.PI * 2;
-    const r = R * (1.0 + jitter * (i % 2 ? -1 : 1));
-    ring.push(new THREE.Vector3(Math.cos(a) * r, 0, Math.sin(a) * r));
-  }
-
-  const faces = [];
-  for (let i = 0; i < 5; i++) faces.push({ rest: [top.clone(), ring[i].clone(), ring[(i+1)%5].clone()], tag: 'T' });
-  for (let i = 0; i < 5; i++) faces.push({ rest: [bot.clone(), ring[(i+1)%5].clone(), ring[i].clone()], tag: 'B' });
-
-  const hinges = [];
-  for (let i = 1; i < 5; i++) {
-    hinges.push({
-      child: i, parent: i-1,
-      parentEdge: [0,2], childEdge: [0,1], group: 'top',
-      ampDeg: 36 - i, freq: 0.10 + 0.02*i, phase: 0.6*i
-    });
-  }
-  hinges.push({ child: 5, parent: 0, parentEdge: [1,2], childEdge: [1,2], group: 'bottom', ampDeg: 44, freq: 0.16, phase: 0.5 });
-  for (let k = 6; k < 10; k++) {
-    hinges.push({
-      child: k, parent: k-1,
-      parentEdge: [1,2], childEdge: [1,2], group: 'bottom',
-      ampDeg: 42 - (k-6), freq: 0.09 + 0.02*(k-6), phase: 0.85 + 0.75*(k-6)
-    });
-  }
-  return { faces, hinges };
-}
-
-function buildPentagonalTrapezohedronSpec() {
-  const H = 1.05, h = 0.42, R1 = 0.95, R2 = 1.05, off = Math.PI / 5;
-  const N = new THREE.Vector3(0,  H, 0);
-  const S = new THREE.Vector3(0, -H, 0);
-  const topR = [], botR = [];
-  for (let i = 0; i < 5; i++) {
-    const aTop = (i / 5) * Math.PI * 2;
-    const aBot = aTop + off;
-    topR.push(new THREE.Vector3(Math.cos(aTop)*R1,  h, Math.sin(aTop)*R1));
-    botR.push(new THREE.Vector3(Math.cos(aBot)*R2, -h, Math.sin(aBot)*R2));
-  }
-  const faces = [];
-  for (let i = 0; i < 5; i++) faces.push({ rest: [N.clone(), topR[i].clone(), botR[i].clone(), topR[(i+1)%5].clone()], tag: 'U' });
-  for (let i = 0; i < 5; i++) faces.push({ rest: [S.clone(), botR[i].clone(), topR[i].clone(), botR[(i+1)%5].clone()], tag: 'L' });
-
-  const hinges = [];
-  for (let i = 1; i < 5; i++) {
-    hinges.push({
-      child: i, parent: i-1,
-      parentEdge: [0,3], childEdge: [0,1], group: 'top',
-      ampDeg: 34 - i, freq: 0.11 + 0.02*i, phase: 0.8*i
-    });
-  }
-  hinges.push({ child: 5, parent: 0, parentEdge: [1,2], childEdge: [1,2], group: 'bottom', ampDeg: 40, freq: 0.15, phase: 0.5 });
-  for (let k = 6; k < 10; k++) {
-    hinges.push({
-      child: k, parent: k-1,
-      parentEdge: [0,3], childEdge: [0,1], group: 'bottom',
-      ampDeg: 38 - (k-6), freq: 0.10 + 0.02*(k-6), phase: 1.1 + 0.7*(k-6)
-    });
-  }
-  return { faces, hinges };
-}
-
-// ---------- Shape instance management ----------
-let shape = null;
-
-function makeShape(kind) {
-  const spec = (kind === 'trapezohedron') ? buildPentagonalTrapezohedronSpec()
-            : (kind === 'dipyramid')      ? buildPentagonalDipyramidSpec()
-            :                                buildDodecahedronSpec(); // default
-  const inst = new RigidHingeMesh(spec);
-  return inst;
-}
-
-function switchShape(kind) {
-  const prevUniforms = shape?.mesh.material.userData._overlayUniforms || null;
-
-  if (shape) {
-    scene.remove(shape.group);
-    shape.dispose();
-    shape = null;
-  }
-  shape = makeShape(kind);
-  scene.add(shape.group);
-
-  // Reapply overlay uniforms from previous instance so UI values persist
-  if (prevUniforms) {
-    const u = shape.mesh.material.userData._overlayUniforms;
-    if (u) {
-      u.uBandAngle.value    = prevUniforms.uBandAngle.value;
-      u.uBandSpeed.value    = prevUniforms.uBandSpeed.value;
-      u.uBandFreq1.value    = prevUniforms.uBandFreq1.value;
-      u.uBandFreq2.value    = prevUniforms.uBandFreq2.value;
-      u.uBandAngle2.value   = prevUniforms.uBandAngle2.value;
-      u.uBandStrength.value = prevUniforms.uBandStrength.value;
-      u.uTriScale.value     = prevUniforms.uTriScale.value;
-      u.uWarp.value         = prevUniforms.uWarp.value;
-      u.uCellAmp.value      = prevUniforms.uCellAmp.value;
-      u.uCellFreq.value     = prevUniforms.uCellFreq.value;
-    }
-  }
-}
-
-// ---------- Post-processing pipeline ----------
+// ---------- post processing ----------
 const composer = new EffectComposer(renderer);
 composer.addPass(new RenderPass(scene, camera));
 
@@ -750,33 +394,33 @@ rgbShiftPass.uniforms['amount'].value = 0.0;
 rgbShiftPass.uniforms['angle'].value  = 0.0;
 composer.addPass(rgbShiftPass);
 
-// ---------- GUI ----------
+// ---------- gui ----------
 const uiHost = document.getElementById('ui');
 const gui = new GUI({ title: 'Controls', width: 320 });
 uiHost.appendChild(gui.domElement);
 
 const params = {
-  objectType: 'dodecahedron', // default: dodecahedron
-  play: true,
-  foldSpeed: 1.0,
-  foldMode: 'self-fold',   // 'self-fold' | 'free'
-  foldMinDeg: 0.0,         // start flatter
-  foldMaxDeg: 55.0,        // keep under ~90 to feel like paper
+  // movement + topology
+  count:        24,      // number of points
+  amp:          0.85,    // movement amplitude (radius around anchor)
+  freq:         0.6,     // Hz — how often a new goal is chosen
+  connectDist:  0.75,    // connect when distance <= this
+  breakDist:    0.95,    // disconnect when distance >= this
+  ribbonWidth:  0.045,   // visual width of edge ribbons
 
-  // Glow (bloom)
-  bloomStrength: 0.0,
-  bloomThreshold: 0.9,
-  bloomRadius: 0.2,
+  // renderer / fx
+  play:         true,
+  foldSpeed:    1.0,     // global time scale (affects motion speed)
+  bloomStrength:0.0,
+  bloomThreshold:0.9,
+  bloomRadius:  0.2,
+  trailAmount:  0.0,
+  rgbAmount:    0.0,
+  rgbAngle:     0.0,
+  exposure:     renderer.toneMappingExposure,
 
-  // Trails / Ghosting
-  trailAmount: 0.0,
-
-  // RGB offset
-  rgbAmount: 0.0,
-  rgbAngle: 0.0,
-
-  // View
-  exposure: renderer.toneMappingExposure,
+  // actions
+  reseed: () => { swarm.reseed(); },
   resetCamera: () => {
     camera.position.set(3.0, 1.9, 5.0);
     controls.target.set(0,0,0);
@@ -784,20 +428,25 @@ const params = {
   }
 };
 
-const fShape = gui.addFolder('Shape');
-fShape.add(params, 'objectType', {
-  'Dodecahedron (12 pentagons)': 'dodecahedron',
-  'Pentagonal Dipyramid (10 triangles)': 'dipyramid',
-  'Pentagonal Trapezohedron (10 kites)': 'trapezohedron'
-}).name('Object Type').onChange(v => switchShape(v));
-
-fShape.add(params, 'foldMode', { 'Self-fold (1‑DOF)': 'self-fold', 'Free (multi‑DOF)': 'free' }).name('Fold Mode');
-fShape.add(params, 'foldMinDeg', 0, 89, 0.1).name('Fold Min (°)');
-fShape.add(params, 'foldMaxDeg', 1, 89, 0.1).name('Fold Max (°)');
+const fSystem = gui.addFolder('Swarm');
+fSystem.add(params, 'count', 4, 128, 1).name('Points').onFinishChange(v => { swarm.setCount(v); });
+fSystem.add(params, 'amp', 0.0, 2.0, 0.001).name('Amplitude').onChange(v => { swarm.params.amp = v; });
+fSystem.add(params, 'freq', 0.0, 3.0, 0.001).name('Frequency (Hz)').onChange(v => { swarm.params.freq = v; });
+fSystem.add(params, 'connectDist', 0.05, 2.0, 0.001).name('Connect at ≤').onChange(v => {
+  swarm.params.connectDist = v;
+  if (params.breakDist < v) { params.breakDist = v; swarm.params.breakDist = v; gui.updateDisplay(); }
+});
+fSystem.add(params, 'breakDist', 0.05, 2.0, 0.001).name('Break at ≥').onChange(v => {
+  swarm.params.breakDist = Math.max(v, params.connectDist);
+  params.breakDist = swarm.params.breakDist;
+  gui.updateDisplay();
+});
+fSystem.add(params, 'ribbonWidth', 0.005, 0.12, 0.001).name('Ribbon Width').onChange(v => { swarm.params.ribbonWidth = v; });
+fSystem.add(params, 'reseed').name('Reseed');
 
 const fAnim = gui.addFolder('Animation');
 fAnim.add(params, 'play').name('Play / Pause');
-fAnim.add(params, 'foldSpeed', 0.0, 3.0, 0.01).name('Fold Speed');
+fAnim.add(params, 'foldSpeed', 0.0, 3.0, 0.01).name('Time Scale');
 
 const fGlow = gui.addFolder('Glow (Bloom)');
 fGlow.add(params, 'bloomStrength', 0.0, 2.5, 0.01).name('Strength').onChange(v => {
@@ -807,7 +456,7 @@ fGlow.add(params, 'bloomStrength', 0.0, 2.5, 0.01).name('Strength').onChange(v =
 fGlow.add(params, 'bloomThreshold', 0.0, 1.0, 0.001).name('Threshold').onChange(v => bloomPass.threshold = v);
 fGlow.add(params, 'bloomRadius', 0.0, 1.0, 0.001).name('Radius').onChange(v => bloomPass.radius = v);
 
-const fTrail = gui.addFolder('Trails (Ghosting)');
+const fTrail = gui.addFolder('Trails');
 fTrail.add(params, 'trailAmount', 0.0, 1.0, 0.001).name('Amount').onChange(v => {
   const damp = 1.0 - v * 0.98;
   afterimagePass.uniforms['damp'].value = damp;
@@ -826,40 +475,39 @@ const fView = gui.addFolder('View');
 fView.add(params, 'exposure', 0.6, 1.8, 0.01).name('Exposure').onChange(v => renderer.toneMappingExposure = v);
 fView.add(params, 'resetCamera').name('Reset Camera');
 
-// Surface (Advanced)
-const surface = { angle: 28, angle2: 82, speed: 0.25, freq1: 6.0, freq2: 9.5, strength: 0.52, triScale: 1.15, warp: 0.55, cellAmp: 0.55, cellFreq: 2.75 };
-const U = () => shape?.mesh.material.userData._overlayUniforms;
-const fSurface = gui.addFolder('Surface (Advanced)');
-fSurface.add(surface, 'angle', 0, 180, 0.1).name('Stripe Angle (°)').onChange(v => { const u = U(); if (u) u.uBandAngle.value  = THREE.MathUtils.degToRad(v); });
-fSurface.add(surface, 'angle2', 0, 180, 0.1).name('Stripe2 Angle (°)').onChange(v => { const u = U(); if (u) u.uBandAngle2.value = THREE.MathUtils.degToRad(v); });
-fSurface.add(surface, 'speed', 0, 2, 0.001).name('Stripe Rot Speed').onChange(v => { const u = U(); if (u) u.uBandSpeed.value = v; });
-fSurface.add(surface, 'freq1', 1, 20, 0.1).name('Stripe Freq 1').onChange(v => { const u = U(); if (u) u.uBandFreq1.value = v; });
-fSurface.add(surface, 'freq2', 1, 20, 0.1).name('Stripe Freq 2').onChange(v => { const u = U(); if (u) u.uBandFreq2.value = v; });
-fSurface.add(surface, 'strength', 0, 1, 0.01).name('Emissive Strength').onChange(v => { const u = U(); if (u) u.uBandStrength.value = v; });
-fSurface.add(surface, 'triScale', 0.2, 4, 0.01).name('Tri-Planar Scale').onChange(v => { const u = U(); if (u) u.uTriScale.value = v; });
-fSurface.add(surface, 'warp', 0, 1.5, 0.01).name('Domain Warp').onChange(v => { const u = U(); if (u) u.uWarp.value = v; });
-fSurface.add(surface, 'cellAmp', 0, 1, 0.01).name('Cellular Mix').onChange(v => { const u = U(); if (u) u.uCellAmp.value = v; });
-fSurface.add(surface, 'cellFreq', 0.5, 8, 0.01).name('Cellular Freq').onChange(v => { const u = U(); if (u) u.uCellFreq.value = v; });
-fSurface.close();
+// ---------- create swarm ----------
+const swarm = new FoldingSwarm({
+  count: params.count,
+  amp: params.amp,
+  freq: params.freq,
+  connectDist: params.connectDist,
+  breakDist: params.breakDist,
+  ribbonWidth: params.ribbonWidth
+});
 
-// ---------- Create initial shape (Dodecahedron) ----------
-switchShape(params.objectType);
-
-// ---------- Render loop ----------
+// ---------- loop ----------
 let t0 = performance.now();
 function animate() {
   requestAnimationFrame(animate);
-  const now = performance.now();
-  const t = (now - t0) / 1000;
+  const nowMs = performance.now();
+  const t = (nowMs - t0) / 1000;
 
-  if (params.play && shape) shape.update(t, params.foldSpeed);
+  if (params.play) {
+    const dt = Math.min(1/30, (1/60) * params.foldSpeed); // stable delta (tied to time scale)
+    swarm.params.amp        = params.amp;
+    swarm.params.freq       = params.freq;
+    swarm.params.connectDist= params.connectDist;
+    swarm.params.breakDist  = params.breakDist;
+    swarm.params.ribbonWidth= params.ribbonWidth;
+    swarm.update(dt, t);
+  }
 
   controls.update();
   composer.render();
 }
 animate();
 
-// ---------- Resize handling ----------
+// ---------- resize ----------
 function onResize() {
   const w = container.clientWidth;
   const h = container.clientHeight;
