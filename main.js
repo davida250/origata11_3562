@@ -1,8 +1,9 @@
-// Origata — Brownian polygon surface + blurred trails + luma‑preserving RGB shift
+// Origata — Brownian polygon surface + echo trails + luma‑preserving RGB
 // ---------------------------------------------------------------------------------------
-// Everything (renderer/env/material/overlay/post) follows your original stack; we only
-// extend the trail pass with a small blur and swap the RGB offset shader so it does NOT
-// change scene brightness when enabled.  Baseline provenance: your original main.js.  :contentReference[oaicite:1]{index=1}
+// Everything (renderer/env/material/overlay/bloom/RGB) adheres to your original stack.
+// Trails are now composited so the current frame NEVER dims — only echoes fade.
+// Points initialize near a chosen surface (Sphere/Cube/Torus) with +/- offset.
+// Baseline provenance (materials/pipeline structure) from your original main.js.  :contentReference[oaicite:1]{index=1}
 
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
@@ -13,13 +14,11 @@ import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { AfterimagePass } from 'three/addons/postprocessing/AfterimagePass.js';
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
-
-// NOTE: we replace the stock RGBShiftShader with a luma‑preserving variant below.
-import { RGBShiftShader } from 'three/addons/shaders/RGBShiftShader.js'; // kept for reference/API parity
+import { SavePass } from 'three/addons/postprocessing/SavePass.js';
 
 import GUI from 'https://cdn.jsdelivr.net/npm/lil-gui@0.20/+esm';
 
-// ---------- scene bootstrap ----------
+// ---------- scene bootstrap (same) ----------
 const container = document.getElementById('scene-container');
 
 const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
@@ -46,7 +45,7 @@ const pmrem = new THREE.PMREMGenerator(renderer);
 const envRT = pmrem.fromScene(new RoomEnvironment(), 0.04);
 scene.environment = envRT.texture;
 
-// ---------- shared overlay (same as before) ----------
+// ---------- overlay shader (unchanged look) ----------
 function injectOverlay(material) {
   const uniforms = {
     uTime:         { value: 0 },
@@ -167,7 +166,6 @@ function injectOverlay(material) {
           vec3 colYZ = stripeField(p.zy, uBandAngle);
 
           vec3 c = w.x * colYZ + w.y * colXZ + w.z * colXY;
-
           totalEmissiveRadiance += c * uBandStrength;
         }
       `);
@@ -181,6 +179,9 @@ function injectOverlay(material) {
 class BrownianSurface {
   constructor(opts) {
     this.params = { ...opts };
+
+    this.surfaceType = opts.surfaceType || 'sphere';
+    this.surfaceJitter = opts.surfaceJitter ?? 0.12;
 
     this.N = 0;
     this.pos = null;   // Float32Array (N*3)
@@ -216,6 +217,16 @@ class BrownianSurface {
     this.setCount(this.params.count);
   }
 
+  setSurfaceType(type) {
+    this.surfaceType = type;
+    this.setCount(this.N);
+  }
+
+  setSurfaceJitter(j) {
+    this.surfaceJitter = j;
+    this.setCount(this.N);
+  }
+
   setCount(n) {
     n = Math.max(3, Math.floor(n));
     this.N = n;
@@ -224,16 +235,63 @@ class BrownianSurface {
     this.anc = new Float32Array(n * 3);
     this.state = new Uint8Array(n * n);
 
-    const R = 1.6;
-    for (let i = 0; i < n; i++) {
-      const a = randInSphere(R);
-      const p = a.clone().add(randInSphere(0.12));
+    this._initAnchorsFromSurface(this.surfaceType, this.surfaceJitter);
+    this._rebuildFromTriangles([]);
+  }
+
+  _initAnchorsFromSurface(type, jitter) {
+    const R = 1.45;         // presentation scale
+    const half = 1.0;       // cube half-size
+    const Rt = 1.10, rt = 0.45; // torus radii (major/minor)
+
+    const v = new THREE.Vector3(), n = new THREE.Vector3();
+    for (let i = 0; i < this.N; i++) {
+      if (type === 'cube') {
+        // pick a face uniformly
+        const f = Math.floor(Math.random()*6);
+        const u = (Math.random()*2 - 1) * half;
+        const w = (Math.random()*2 - 1) * half;
+        switch (f) {
+          case 0: v.set( half, u, w); n.set( 1, 0, 0); break; // +X
+          case 1: v.set(-half, u, w); n.set(-1, 0, 0); break; // -X
+          case 2: v.set(u,  half, w); n.set(0,  1, 0); break; // +Y
+          case 3: v.set(u, -half, w); n.set(0, -1, 0); break; // -Y
+          case 4: v.set(u, w,  half); n.set(0, 0,  1); break; // +Z
+          default:v.set(u, w, -half); n.set(0, 0, -1); break; // -Z
+        }
+        v.multiplyScalar(R / (Math.sqrt(3)*half)); // normalize to similar scale as sphere
+      } else if (type === 'torus') {
+        const U = Math.random() * Math.PI * 2;
+        const V = Math.random() * Math.PI * 2;
+        const cx = Rt * Math.cos(U), cz = Rt * Math.sin(U);
+        const px = (Rt + rt * Math.cos(V)) * Math.cos(U);
+        const py = rt * Math.sin(V);
+        const pz = (Rt + rt * Math.cos(V)) * Math.sin(U);
+        v.set(px, py, pz);
+        const c = new THREE.Vector3(cx, 0, cz);
+        n.copy(v).sub(c).normalize();
+      } else {
+        // sphere
+        const u = Math.random();
+        const vv = Math.random();
+        const theta = 2*Math.PI*u;
+        const phi = Math.acos(2*vv - 1);
+        n.set(
+          Math.sin(phi)*Math.cos(theta),
+          Math.cos(phi),
+          Math.sin(phi)*Math.sin(theta)
+        ).normalize();
+        v.copy(n).multiplyScalar(R);
+      }
+
+      const off = (Math.random()*2 - 1) * jitter;
+      const p  = v.clone().add(n.clone().multiplyScalar(off));
+
       const o = i * 3;
-      this.anc[o+0] = a.x; this.anc[o+1] = a.y; this.anc[o+2] = a.z;
+      this.anc[o+0] = v.x; this.anc[o+1] = v.y; this.anc[o+2] = v.z;
       this.pos[o+0] = p.x; this.pos[o+1] = p.y; this.pos[o+2] = p.z;
       this.vel[o+0] = 0;   this.vel[o+1] = 0;   this.vel[o+2] = 0;
     }
-    this._rebuildFromTriangles([]);
   }
 
   _computeTriangles() {
@@ -310,7 +368,7 @@ class BrownianSurface {
   }
 
   update(dt, now) {
-    // Motion (OU-flavored Brownian around anchors)
+    // OU-like motion around surface anchors
     const N = this.N;
     const { amp, freq } = this.params;
     const beta = THREE.MathUtils.clamp(1.2 * freq + 0.2, 0, 12);
@@ -321,6 +379,7 @@ class BrownianSurface {
     for (let i = 0; i < N; i++) {
       const o = i * 3;
       const nx = randn() * sigma * sqrtDt, ny = randn() * sigma * sqrtDt, nz = randn() * sigma * sqrtDt;
+
       const px = this.pos[o+0], py = this.pos[o+1], pz = this.pos[o+2];
       let vx = this.vel[o+0], vy = this.vel[o+1], vz = this.vel[o+2];
       const ax = this.anc[o+0], ay = this.anc[o+1], az = this.anc[o+2];
@@ -341,7 +400,7 @@ class BrownianSurface {
       this.pos[o+0] = nxp; this.pos[o+1] = nyp; this.pos[o+2] = nzp;
     }
 
-    // Adjacency with hysteresis
+    // Proximity edges with hysteresis
     const onR  = this.params.connectDist, offR = Math.max(this.params.breakDist, onR + 1e-4);
     const S = this.state;
 
@@ -381,11 +440,6 @@ class BrownianSurface {
 }
 
 // ---------- utils ----------
-function randInSphere(r=1) {
-  const v = new THREE.Vector3();
-  do { v.set(Math.random()*2-1, Math.random()*2-1, Math.random()*2-1); } while (v.lengthSq() > 1);
-  return v.multiplyScalar(r);
-}
 function randn() { // Gaussian
   let u = 0, v = 0;
   while (u === 0) u = Math.random();
@@ -394,81 +448,97 @@ function randn() { // Gaussian
 }
 
 // ---------- post pipeline ----------
-// Basic render
+// We'll render the scene, SAVE the current frame, build trails with Afterimage,
+// then COMPOSITE: final = base + k * (historyOnly). This keeps base brightness intact.
+
+// Base render
 const composer = new EffectComposer(renderer);
 const renderPass = new RenderPass(scene, camera);
 composer.addPass(renderPass);
 
-// Afterimage (temporal trails)
-const afterimagePass = new AfterimagePass();
+// Save the current frame (for trail composition / "base")
+const saveBaseRT = new THREE.WebGLRenderTarget(container.clientWidth, container.clientHeight, { depthBuffer: false, stencilBuffer: false });
+const saveBasePass = new SavePass(saveBaseRT);
+composer.addPass(saveBasePass);
+
+// Afterimage (temporal accumulator); it will hold base * (1-damp) + damp*history
+const afterimagePass = new AfterimagePass(); // we will NOT render this directly to screen
 afterimagePass.enabled = false;
-afterimagePass.uniforms['damp'].value = 0.96;  // long trails when close to 1
+afterimagePass.uniforms['damp'].value = 0.96;
 composer.addPass(afterimagePass);
 
-// TrailPost shader: optional blur + gain/gamma/saturation (to shape trails)
-// Uses a compact 9-tap gaussian-ish kernel; blur strength is in pixels.
-const TrailPostShader = {
+// TrailComposite shader: blur + isolate history + add on top of base
+const TrailCompositeShader = {
   uniforms: {
-    tDiffuse:     { value: null },
-    uGain:        { value: 1.0 },
-    uGamma:       { value: 1.0 },
-    uSaturation:  { value: 1.0 },
-    uBlurPx:      { value: 0.0 },        // pixels
-    uBlurSigma:   { value: 1.0 },
-    uInvResolution:{ value: new THREE.Vector2(1,1) }
+    tDiffuse:      { value: null },             // afterimage output
+    tBase:         { value: saveBaseRT.texture },
+    uDamp:         { value: afterimagePass.uniforms['damp'].value },
+
+    uGain:         { value: 1.0 },
+    uGamma:        { value: 1.0 },
+    uSaturation:   { value: 1.0 },
+    uBlurPx:       { value: 0.75 },
+    uBlurSigma:    { value: 1.0 },
+    uInvResolution:{ value: new THREE.Vector2(1/container.clientWidth, 1/container.clientHeight) }
   },
   vertexShader: `
     varying vec2 vUv;
     void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }
   `,
   fragmentShader: `
-    uniform sampler2D tDiffuse;
+    uniform sampler2D tDiffuse;   // afterimage buffer
+    uniform sampler2D tBase;      // current saved base frame
+    uniform float uDamp;
+
     uniform float uGain, uGamma, uSaturation;
     uniform float uBlurPx, uBlurSigma;
     uniform vec2  uInvResolution;
-    varying vec2 vUv;
 
-    vec3 sampleBlur(vec2 uv){
-      // weights for distances: 0, 1, sqrt(2) (in 'steps' of uBlurPx)
+    vec3 blur9(sampler2D tex, vec2 uv){
       float sigma = max(uBlurSigma, 1e-4);
       float w0 = 1.0;
       float w1 = exp(-0.5 * pow(1.0/sigma, 2.0));
       float w2 = exp(-0.5 * pow(1.41421356237/sigma, 2.0));
       float WS = w0 + 4.0*w1 + 4.0*w2;
-
       vec2 px = uInvResolution * uBlurPx;
-      vec3 c = texture2D(tDiffuse, uv).rgb * w0;
-      c += texture2D(tDiffuse, uv + vec2( px.x, 0.0)).rgb * w1;
-      c += texture2D(tDiffuse, uv + vec2(-px.x, 0.0)).rgb * w1;
-      c += texture2D(tDiffuse, uv + vec2( 0.0, px.y)).rgb * w1;
-      c += texture2D(tDiffuse, uv + vec2( 0.0,-px.y)).rgb * w1;
 
-      c += texture2D(tDiffuse, uv + vec2( px.x,  px.y)).rgb * w2;
-      c += texture2D(tDiffuse, uv + vec2(-px.x,  px.y)).rgb * w2;
-      c += texture2D(tDiffuse, uv + vec2( px.x, -px.y)).rgb * w2;
-      c += texture2D(tDiffuse, uv + vec2(-px.x, -px.y)).rgb * w2;
+      vec3 c = texture2D(tex, uv).rgb * w0;
+      c += texture2D(tex, uv + vec2( px.x, 0.0)).rgb * w1;
+      c += texture2D(tex, uv + vec2(-px.x, 0.0)).rgb * w1;
+      c += texture2D(tex, uv + vec2( 0.0, px.y)).rgb * w1;
+      c += texture2D(tex, uv + vec2( 0.0,-px.y)).rgb * w1;
+
+      c += texture2D(tex, uv + vec2( px.x,  px.y)).rgb * w2;
+      c += texture2D(tex, uv + vec2(-px.x,  px.y)).rgb * w2;
+      c += texture2D(tex, uv + vec2( px.x, -px.y)).rgb * w2;
+      c += texture2D(tex, uv + vec2(-px.x, -px.y)).rgb * w2;
 
       return c / WS;
     }
 
     void main(){
-      vec3 col = (uBlurPx > 0.0001) ? sampleBlur(vUv) : texture2D(tDiffuse, vUv).rgb;
+      vec3 base     = blur9(tBase,    vUv);      // blur to match trail blur
+      vec3 afterImg = blur9(tDiffuse, vUv);
 
-      // simple tone tools to emphasize trails if desired
-      float l = dot(col, vec3(0.2126, 0.7152, 0.0722));
-      col = mix(vec3(l), col, uSaturation);
-      col = pow(max(col, 0.0), vec3(1.0 / max(0.0001, uGamma)));
-      col *= uGain;
+      // Isolate history only (remove current contribution): history ≈ afterimage - (1-damp)*base
+      vec3 history = max(afterImg - (1.0 - uDamp) * base, vec3(0.0));
 
-      gl_FragColor = vec4(col, 1.0);
+      // Tone controls apply to HISTORY ONLY
+      float l = dot(history, vec3(0.2126, 0.7152, 0.0722));
+      history = mix(vec3(l), history, uSaturation);
+      history = pow(max(history, 0.0), vec3(1.0 / max(0.0001, uGamma)));
+      history *= uGain;
+
+      vec3 finalCol = clamp(base + history, 0.0, 1.0);
+      gl_FragColor = vec4(finalCol, 1.0);
     }
   `
 };
-const trailPostPass = new ShaderPass(TrailPostShader);
-trailPostPass.enabled = false;
-composer.addPass(trailPostPass);
+const trailCompositePass = new ShaderPass(TrailCompositeShader);
+trailCompositePass.enabled = false;
+composer.addPass(trailCompositePass);
 
-// Bloom (unchanged)
+// Bloom (kept)
 const bloomPass = new UnrealBloomPass(
   new THREE.Vector2(container.clientWidth, container.clientHeight),
   0.0, 0.2, 0.9
@@ -502,7 +572,7 @@ const RGBShiftLumaShader = {
 
       vec3 shifted = vec3(cr.r, base.g, cb.b);
 
-      // preserve scene luma to avoid perceived brightness change
+      // preserve scene luma
       const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
       float lBase = dot(base.rgb, LUMA);
       float lSh   = max(1e-5, dot(shifted, LUMA));
@@ -525,11 +595,13 @@ uiHost.appendChild(gui.domElement);
 
 const params = {
   // Brownian surface
-  count:        36,
-  amp:          0.85,
-  freq:         0.9,
-  connectDist:  0.78,
-  breakDist:    0.98,
+  primitive:     'sphere',  // 'sphere' | 'cube' | 'torus'
+  surfaceJitter: 0.12,      // initial +/- offset along surface normal
+  count:         36,
+  amp:           0.85,
+  freq:          0.9,
+  connectDist:   0.78,
+  breakDist:     0.98,
 
   // Animation
   play:       true,
@@ -540,16 +612,16 @@ const params = {
   bloomThreshold:0.9,
   bloomRadius:   0.2,
 
-  // Trails (expanded; now includes blur + tone)
-  trailEnabled:    false,
-  trailPersistence:96.0,  // % of previous frame kept each step (0..99.9)
-  trailHalfLife:   0.0,   // seconds; if >0, overrides persistence using exp(-ln2*dt/halfLife)
-  trailBlurPx:     0.75,  // pixels of blur (0 = off)
-  trailBlurSigma:  1.0,   // gaussian sharpness (0.5..3 is useful)
-  trailBoost:      1.0,   // gain
-  trailGamma:      1.0,   // gamma
-  trailSaturation: 1.0,   // saturation
-  trailClear:      () => { _clearTrailsNext = true; },
+  // Trails (echoes that DO NOT dim the base)
+  trailEnabled:     false,
+  trailPersistence: 96.0, // % kept each step (0..99.9). Higher => longer history
+  trailHalfLife:    0.0,  // seconds; if >0, overrides persistence each frame
+  trailBlurPx:      0.75, // pixels
+  trailBlurSigma:   1.0,
+  trailGain:        1.0,  // brightness of echoes
+  trailGamma:       1.0,
+  trailSaturation:  1.0,
+  trailClear:       () => { _clearTrailsNext = true; },
 
   // RGB offset (brightness‑neutral)
   rgbAmount:     0.0,
@@ -569,12 +641,20 @@ const params = {
 };
 
 const surface = new BrownianSurface({
+  surfaceType: params.primitive,
+  surfaceJitter: params.surfaceJitter,
   count: params.count,
   amp: params.amp,
   freq: params.freq,
   connectDist: params.connectDist,
   breakDist: params.breakDist
 });
+
+const fSrc = gui.addFolder('Surface Source');
+fSrc.add(params, 'primitive', { Sphere: 'sphere', Cube: 'cube', Torus: 'torus' })
+   .name('Primitive')
+   .onChange(v => surface.setSurfaceType(v));
+fSrc.add(params, 'surfaceJitter', 0.0, 0.6, 0.001).name('± Offset').onFinishChange(v => surface.setSurfaceJitter(v));
 
 const fSys = gui.addFolder('Brownian Surface');
 fSys.add(params, 'count', 4, 200, 1).name('Vertices').onFinishChange(v => surface.setCount(v));
@@ -602,20 +682,19 @@ fGlow.add(params, 'bloomStrength', 0.0, 2.5, 0.01).name('Strength').onChange(v =
 fGlow.add(params, 'bloomThreshold', 0.0, 1.0, 0.001).name('Threshold').onChange(v => bloomPass.threshold = v);
 fGlow.add(params, 'bloomRadius', 0.0, 1.0, 0.001).name('Radius').onChange(v => bloomPass.radius = v);
 
-// --- Trails / Ghosting (blur + tone) ---
-const fTrail = gui.addFolder('Trails (Ghosting)');
-fTrail.add(params, 'trailEnabled').name('Enable').onChange(v => { afterimagePass.enabled = v; updateTrailPostEnabled(); });
+// Trails (Echoes)
+const fTrail = gui.addFolder('Trails (Echoes)');
+fTrail.add(params, 'trailEnabled').name('Enable').onChange(v => updateTrailEnabled());
 fTrail.add(params, 'trailPersistence', 0.0, 99.9, 0.1).name('Persistence (%)');
 fTrail.add(params, 'trailHalfLife', 0.0, 6.0, 0.01).name('Half-life (s)');
-fTrail.add(params, 'trailBlurPx', 0.0, 3.0, 0.01).name('Blur (px)').onChange(updateTrailPostUniforms);
-fTrail.add(params, 'trailBlurSigma', 0.5, 3.0, 0.01).name('Blur Sigma').onChange(updateTrailPostUniforms);
-fTrail.add(params, 'trailBoost', 0.1, 4.0, 0.01).name('Boost').onChange(updateTrailPostUniforms);
-fTrail.add(params, 'trailGamma', 0.5, 2.5, 0.01).name('Gamma').onChange(updateTrailPostUniforms);
-fTrail.add(params, 'trailSaturation', 0.0, 2.0, 0.01).name('Saturation').onChange(updateTrailPostUniforms);
+fTrail.add(params, 'trailBlurPx', 0.0, 3.0, 0.01).name('Blur (px)').onChange(updateTrailUniforms);
+fTrail.add(params, 'trailBlurSigma', 0.5, 3.0, 0.01).name('Blur Sigma').onChange(updateTrailUniforms);
+fTrail.add(params, 'trailGain', 0.1, 4.0, 0.01).name('Echo Gain').onChange(updateTrailUniforms);
+fTrail.add(params, 'trailGamma', 0.5, 2.5, 0.01).name('Echo Gamma').onChange(updateTrailUniforms);
+fTrail.add(params, 'trailSaturation', 0.0, 2.0, 0.01).name('Echo Saturation').onChange(updateTrailUniforms);
 fTrail.add(params, 'trailClear').name('Clear Trails');
 
-// --- RGB offset (brightness‑neutral) ---
-const fRGB = gui.addFolder('RGB Offset');
+const fRGB = gui.addFolder('RGB Offset (Luma‑neutral)');
 fRGB.add(params, 'rgbAmount', 0.0, 0.10, 0.0001).name('Amount').onChange(() => updateRGBEnabled());
 fRGB.add(params, 'rgbAngle', 0.0, 360.0, 0.1).name('Angle (°)').onChange(v => {
   rgbShiftPass.uniforms['angle'].value = THREE.MathUtils.degToRad(v);
@@ -629,45 +708,41 @@ const fView = gui.addFolder('View');
 fView.add(params, 'exposure', 0.6, 1.8, 0.01).name('Exposure').onChange(v => renderer.toneMappingExposure = v);
 fView.add(params, 'resetCamera').name('Reset Camera');
 
-// Advanced overlay controls (unchanged)
+// overlay controls (optional)
 const surfaceAdv = { angle: 28, angle2: 82, speed: 0.25, freq1: 6.0, freq2: 9.5, strength: 0.52, triScale: 1.15, warp: 0.55, cellAmp: 0.55, cellFreq: 2.75 };
 const U = () => surface?.mesh.material.userData._overlayUniforms;
-const fSurface = gui.addFolder('Surface (Advanced)');
-fSurface.add(surfaceAdv, 'angle', 0, 180, 0.1).name('Stripe Angle (°)').onChange(v => { const u = U(); if (u) u.uBandAngle.value  = THREE.MathUtils.degToRad(v); });
-fSurface.add(surfaceAdv, 'angle2', 0, 180, 0.1).name('Stripe2 Angle (°)').onChange(v => { const u = U(); if (u) u.uBandAngle2.value = THREE.MathUtils.degToRad(v); });
-fSurface.add(surfaceAdv, 'speed', 0, 2, 0.001).name('Stripe Rot Speed').onChange(v => { const u = U(); if (u) u.uBandSpeed.value = v; });
-fSurface.add(surfaceAdv, 'freq1', 1, 20, 0.1).name('Stripe Freq 1').onChange(v => { const u = U(); if (u) u.uBandFreq1.value = v; });
-fSurface.add(surfaceAdv, 'freq2', 1, 20, 0.1).name('Stripe Freq 2').onChange(v => { const u = U(); if (u) u.uBandFreq2.value = v; });
-fSurface.add(surfaceAdv, 'strength', 0, 1, 0.01).name('Emissive Strength').onChange(v => { const u = U(); if (u) u.uBandStrength.value = v; });
-fSurface.add(surfaceAdv, 'triScale', 0.2, 4, 0.01).name('Tri-Planar Scale').onChange(v => { const u = U(); if (u) u.uTriScale.value = v; });
-fSurface.add(surfaceAdv, 'warp', 0, 1.5, 0.01).name('Domain Warp').onChange(v => { const u = U(); if (u) u.uWarp.value = v; });
-fSurface.add(surfaceAdv, 'cellAmp', 0, 1, 0.01).name('Cellular Mix').onChange(v => { const u = U(); if (u) u.uCellAmp.value = v; });
-fSurface.add(surfaceAdv, 'cellFreq', 0.5, 8, 0.01).name('Cellular Freq').onChange(v => { const u = U(); if (u) u.uCellFreq.value = v; });
-fSurface.close();
+const fSurfaceAdv = gui.addFolder('Surface (Advanced)');
+fSurfaceAdv.add(surfaceAdv, 'angle', 0, 180, 0.1).name('Stripe Angle (°)').onChange(v => { const u = U(); if (u) u.uBandAngle.value  = THREE.MathUtils.degToRad(v); });
+fSurfaceAdv.add(surfaceAdv, 'angle2', 0, 180, 0.1).name('Stripe2 Angle (°)').onChange(v => { const u = U(); if (u) u.uBandAngle2.value = THREE.MathUtils.degToRad(v); });
+fSurfaceAdv.add(surfaceAdv, 'speed', 0, 2, 0.001).name('Stripe Rot Speed').onChange(v => { const u = U(); if (u) u.uBandSpeed.value = v; });
+fSurfaceAdv.add(surfaceAdv, 'freq1', 1, 20, 0.1).name('Stripe Freq 1').onChange(v => { const u = U(); if (u) u.uBandFreq1.value = v; });
+fSurfaceAdv.add(surfaceAdv, 'freq2', 1, 20, 0.1).name('Stripe Freq 2').onChange(v => { const u = U(); if (u) u.uBandFreq2.value = v; });
+fSurfaceAdv.add(surfaceAdv, 'strength', 0, 1, 0.01).name('Emissive Strength').onChange(v => { const u = U(); if (u) u.uBandStrength.value = v; });
+fSurfaceAdv.add(surfaceAdv, 'triScale', 0.2, 4, 0.01).name('Tri-Planar Scale').onChange(v => { const u = U(); if (u) u.uTriScale.value = v; });
+fSurfaceAdv.add(surfaceAdv, 'warp', 0, 1.5, 0.01).name('Domain Warp').onChange(v => { const u = U(); if (u) u.uWarp.value = v; });
+fSurfaceAdv.add(surfaceAdv, 'cellAmp', 0, 1, 0.01).name('Cellular Mix').onChange(v => { const u = U(); if (u) u.uCellAmp.value = v; });
+fSurfaceAdv.add(surfaceAdv, 'cellFreq', 0.5, 8, 0.01).name('Cellular Freq').onChange(v => { const u = U(); if (u) u.uCellFreq.value = v; });
+fSurfaceAdv.close();
 
-// Helpers to keep trail post enabled only when useful
-function updateTrailPostUniforms() {
-  trailPostPass.uniforms.uGain.value        = params.trailBoost;
-  trailPostPass.uniforms.uGamma.value       = params.trailGamma;
-  trailPostPass.uniforms.uSaturation.value  = params.trailSaturation;
-  trailPostPass.uniforms.uBlurPx.value      = params.trailBlurPx;
-  trailPostPass.uniforms.uBlurSigma.value   = params.trailBlurSigma;
-  updateTrailPostEnabled();
+// helpers
+function updateTrailUniforms() {
+  trailCompositePass.uniforms.uGain.value        = params.trailGain;
+  trailCompositePass.uniforms.uGamma.value       = params.trailGamma;
+  trailCompositePass.uniforms.uSaturation.value  = params.trailSaturation;
+  trailCompositePass.uniforms.uBlurPx.value      = params.trailBlurPx;
+  trailCompositePass.uniforms.uBlurSigma.value   = params.trailBlurSigma;
 }
-function updateTrailPostEnabled() {
-  const needed =
-    Math.abs(params.trailBoost - 1.0) > 1e-4 ||
-    Math.abs(params.trailGamma - 1.0) > 1e-4 ||
-    Math.abs(params.trailSaturation - 1.0) > 1e-4 ||
-    params.trailBlurPx > 0.0001;
-  trailPostPass.enabled = params.trailEnabled && needed;
+function updateTrailEnabled() {
+  const enabled = params.trailEnabled;
+  afterimagePass.enabled       = enabled;
+  trailCompositePass.enabled   = enabled;
+  updateTrailUniforms();
 }
-updateTrailPostUniforms();
-
 function updateRGBEnabled() {
   const active = (params.rgbAmount + params.rgbPulseAmp) > 0 || params.rgbAnimate;
   rgbShiftPass.enabled = active;
 }
+updateTrailEnabled();
 updateRGBEnabled();
 
 // ---------- loop ----------
@@ -690,14 +765,16 @@ function animate() {
     surface.update(dt, now / 1000);
   }
 
-  // Trails: set damp either via half-life or persistence knob
+  // Trails: compute damp (per-frame), push into both passes and isolate history on composite.
   if (params.trailEnabled) {
-    let dampTarget = (params.trailHalfLife > 0)
+    let damp = (params.trailHalfLife > 0)
       ? Math.exp(-Math.LN2 * Math.max(1e-6, dt) / params.trailHalfLife)
       : THREE.MathUtils.clamp(params.trailPersistence / 100.0, 0.0, 0.9999);
-
-    if (_clearTrailsNext) { dampTarget = 0.0; _clearTrailsNext = false; }
-    afterimagePass.uniforms['damp'].value = Math.min(dampTarget, 0.9999);
+    if (_clearTrailsNext) { damp = 0.0; _clearTrailsNext = false; }
+    // clamp slightly below 1.0 so new pixels can enter
+    damp = Math.min(damp, 0.9999);
+    afterimagePass.uniforms['damp'].value = damp;
+    trailCompositePass.uniforms['uDamp'].value = damp;
   }
 
   // RGB offset animation (brightness preserved in shader)
@@ -726,14 +803,12 @@ function onResize() {
   renderer.setSize(w, h);
   composer.setSize(w, h);
   bloomPass.setSize(w, h);
+  saveBaseRT.setSize(w, h);
 
-  // update blur sampling scale for trail post
-  if (trailPostPass && trailPostPass.uniforms && trailPostPass.uniforms.uInvResolution) {
-    trailPostPass.uniforms.uInvResolution.value.set(1 / w, 1 / h);
+  if (trailCompositePass && trailCompositePass.uniforms && trailCompositePass.uniforms.uInvResolution) {
+    trailCompositePass.uniforms.uInvResolution.value.set(1 / w, 1 / h);
   }
 }
 window.addEventListener('resize', onResize);
 new ResizeObserver(onResize).observe(container);
-
-// set initial resolution uniforms
 onResize();
