@@ -1,10 +1,4 @@
-// Origata — Brownian polygon surface + echo trails + luma‑preserving RGB
-// ---------------------------------------------------------------------------------------
-// Fixes:
-//  • Always-on OutputPass so the pipeline renders even when all effects are off.
-//  • SavePass/Afterimage/TrailComposite only enabled when trails are enabled.
-//  • Assign RT texture to uniforms AFTER pass creation to avoid cloneUniforms warnings.
-// Everything else (materials, overlay, glow, overall look) follows your original stack.  :contentReference[oaicite:1]{index=1}
+// Origata
 
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
