@@ -1,8 +1,6 @@
 // Origata — Brownian polygon surface + echo trails + luma‑preserving RGB + Presets
-// Reflection: full PBR controls + PMREM image/video envs + robust UI switching
+// Reflection: full PBR controls + PMREM image/video envs with robust guards
 // Black‑screen hardening: clique‑seeded graph at t=0 → guaranteed triangles.
-//
-// Based on your last uploaded files; UI/FX preserved.  (index.html / main.js)  
 
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
@@ -41,14 +39,16 @@ controls.dampingFactor = 0.06;
 controls.minDistance = 2.0;
 controls.maxDistance = 9.0;
 
-// Environment (default RoomEnvironment → replaced by reflection file if present)
+// Environment (default RoomEnvironment → may be replaced by reflection file)
 const pmrem = new THREE.PMREMGenerator(renderer);
 const defaultEnvRT = pmrem.fromScene(new RoomEnvironment(), 0.04);
 scene.environment = defaultEnvRT.texture;
-let activeEnvRT = defaultEnvRT;
-let reflectionVideo = null;   // HTMLVideoElement if using mp4
-let reflectionTex   = null;   // THREE.VideoTexture or THREE.Texture
-let lastVideoPmrem  = 0;
+
+// active environment trackers
+let activeEnvRT = defaultEnvRT;  // WebGLRenderTarget from PMREM (if any)
+let reflectionVideo = null;      // HTMLVideoElement when using mp4
+let reflectionTex = null;        // THREE.VideoTexture or THREE.Texture
+let lastVideoPmrem = 0;
 
 // ---------- overlay shader (your original look preserved) ----------
 function injectOverlay(material) {
@@ -239,7 +239,7 @@ class BrownianSurface {
     this._initAnchorsFromSurface(this.surfaceType, this.surfaceJitter);
 
     // Seed initial connectivity with clique closure so triangles exist at frame 0
-    this._seedInitialGraph(4, true); // 4‑NN + close the two nearest into a clique
+    this._seedInitialGraph(4, true); // 4-NN + close the 2 nearest into a clique
     const tris0 = this._computeTriangles();
     this._rebuildGeometry(tris0);
   }
@@ -298,7 +298,7 @@ class BrownianSurface {
     }
   }
 
-  // k‑NN seeding; if makeCliques, also connect the two nearest neighbors together
+  // k‑NN seeding; if makeCliques, connect the two nearest neighbors together
   _seedInitialGraph(k = 4, makeCliques = true) {
     const N = this.N, P = this.pos, S = this.state;
     for (let i = 0; i < N; i++) {
@@ -376,6 +376,7 @@ class BrownianSurface {
   _updatePositionsAndNormals() {
     const posAttr = this.geometry.getAttribute('position');
     if (!posAttr) return;
+
     for (let i = 0; i < this.N; i++) {
       const pi = i * 3;
       posAttr.setXYZ(i, this.pos[pi+0], this.pos[pi+1], this.pos[pi+2]);
@@ -442,24 +443,6 @@ class BrownianSurface {
 
     // Triangles = 3‑cliques
     let tris = this._computeTriangles();
-
-    // If (extremely unlikely) empty, gently relax thresholds for one rebuild
-    if (tris.length === 0) {
-      const backupOn = this.params.connectDist;
-      const backupOff= this.params.breakDist;
-      this.params.connectDist = Math.max(0.2, backupOn * 1.15);
-      this.params.breakDist   = Math.max(this.params.connectDist, backupOff * 1.15);
-      // re‑enable some edges
-      for (let i = 0; i < N; i++) for (let j = i+1; j < N; j++) {
-        const ix = i*3, jx = j*3;
-        const dx = this.pos[jx]-this.pos[ix], dy = this.pos[jx+1]-this.pos[ix+1], dz = this.pos[jx+2]-this.pos[ix+2];
-        const d  = Math.sqrt(dx*dx+dy*dy+dz*dz);
-        if (d <= this.params.connectDist) S[i*N+j] = S[j*N+i] = 1;
-      }
-      tris = this._computeTriangles();
-      this.params.connectDist = backupOn;
-      this.params.breakDist   = backupOff;
-    }
 
     // Rebuild or update indices
     const idxAttr = this.geometry.getIndex();
@@ -724,8 +707,7 @@ function syncMaterialFromParams() {
   if (params.reflWorkflow === 'metal') {
     mat.metalness = THREE.MathUtils.clamp(params.reflMetalness, 0, 1);
     mat.color.set(params.reflMetalColor);
-    // Typical metal workflow ignores dielectric IOR/specular knobs
-    mat.ior               = 1.5; // doesn't affect metals significantly
+    mat.ior               = 1.5; // no real effect on true metals
     mat.specularIntensity = 1.0;
   } else {
     mat.metalness = 0.0;
@@ -738,7 +720,7 @@ function syncMaterialFromParams() {
   surface.setFlatShading(params.reflFlatShading);
 }
 
-// --- Folders ---
+// --- Presets (JSON) ---
 const fPresets = gui.addFolder('Presets');
 const presetsCtl = {
   selected: '(none)',
@@ -749,18 +731,20 @@ let presetsDrop = fPresets.add(presetsCtl, 'selected', ['(none)']).name('Select'
 fPresets.add(presetsCtl, 'load').name('Load Selected');
 fPresets.add(presetsCtl, 'reload').name('Reload presets.json');
 
+// Surface source
 const fSrc = gui.addFolder('Surface Source');
 fSrc.add(params, 'primitive', { Sphere: 'sphere', Cube: 'cube', Torus: 'torus' })
    .name('Primitive').onChange(v => surface.setSurfaceType(v));
 fSrc.add(params, 'surfaceJitter', 0.0, 0.6, 0.001).name('± Offset')
     .onFinishChange(v => surface.setSurfaceJitter(v));
 
+// Brownian Surface
 const fSys = gui.addFolder('Brownian Surface');
 let breakCtrl;
 fSys.add(params, 'count', 4, 200, 1).name('Vertices').onFinishChange(v => surface.setCount(v));
 fSys.add(params, 'amp', 0.0, 2.0, 0.001).name('Amplitude').onChange(v => surface.params.amp = v);
 fSys.add(params, 'freq', 0.0, 3.0, 0.001).name('Frequency').onChange(v => surface.params.freq = v);
-const connectCtrl = fSys.add(params, 'connectDist', 0.05, 3.0, 0.001).name('Connect (≤)').onChange(v => {
+fSys.add(params, 'connectDist', 0.05, 3.0, 0.001).name('Connect (≤)').onChange(v => {
   surface.params.connectDist = v;
   if (params.breakDist < v) {
     params.breakDist = v;
@@ -774,10 +758,12 @@ breakCtrl = fSys.add(params, 'breakDist', 0.05, 3.0, 0.001).name('Break (≥)').
   if (typeof breakCtrl.updateDisplay === 'function') breakCtrl.updateDisplay();
 });
 
+// Animation
 const fAnim = gui.addFolder('Animation');
 fAnim.add(params, 'play').name('Play / Pause');
 fAnim.add(params, 'timeScale', 0.0, 3.0, 0.01).name('Time Scale');
 
+// Glow (Bloom)
 const fGlow = gui.addFolder('Glow (Bloom)');
 fGlow.add(params, 'bloomStrength', 0.0, 2.5, 0.01).name('Strength').onChange(v => {
   bloomPass.strength = v;
@@ -786,6 +772,7 @@ fGlow.add(params, 'bloomStrength', 0.0, 2.5, 0.01).name('Strength').onChange(v =
 fGlow.add(params, 'bloomThreshold', 0.0, 1.0, 0.001).name('Threshold').onChange(v => bloomPass.threshold = v);
 fGlow.add(params, 'bloomRadius', 0.0, 1.0, 0.001).name('Radius').onChange(v => bloomPass.radius = v);
 
+// Trails (Echoes)
 const fTrail = gui.addFolder('Trails (Echoes)');
 fTrail.add(params, 'trailEnabled').name('Enable').onChange(updateTrailEnabled);
 fTrail.add(params, 'trailPersistence', 0.0, 99.9, 0.1).name('Persistence (%)');
@@ -797,6 +784,7 @@ fTrail.add(params, 'trailGamma', 0.5, 2.5, 0.01).name('Echo Gamma').onChange(upd
 fTrail.add(params, 'trailSaturation', 0.0, 2.0, 0.01).name('Echo Saturation').onChange(updateTrailUniforms);
 fTrail.add(params, 'trailClear').name('Clear Trails');
 
+// RGB offset (luma‑neutral)
 const fRGB = gui.addFolder('RGB Offset (Luma‑neutral)');
 fRGB.add(params, 'rgbAmount', 0.0, 0.10, 0.0001).name('Amount').onChange(updateRGBEnabled);
 fRGB.add(params, 'rgbAngle', 0.0, 360.0, 0.1).name('Angle (°)')
@@ -809,10 +797,10 @@ fRGB.add(params, 'rgbPulseHz', 0.0, 5.0, 0.001).name('Pulse (Hz)');
 // === Reflection (PBR) ===
 const fRefl = gui.addFolder('Reflection');
 const reflCtrls = { common: [], dielectric: [], metal: [] };
-const cWorkflow = fRefl.add(params, 'reflWorkflow', {
+reflCtrls.common.push(fRefl.add(params, 'reflWorkflow', {
   'Dielectric (non‑metal)': 'dielectric',
   'Metal (PBR)': 'metal'
-}).name('Workflow').onChange(() => { syncMaterialFromParams(); updateReflVisibility(); });
+}).name('Workflow').onChange(() => { syncMaterialFromParams(); updateReflVisibility(); }));
 
 reflCtrls.common.push(fRefl.add(params, 'reflFlatShading').name('Origami (Flat)').onChange(syncMaterialFromParams));
 reflCtrls.common.push(fRefl.add(params, 'reflEnvIntensity', 0.0, 3.0, 0.01).name('Env Intensity').onChange(syncMaterialFromParams));
@@ -827,6 +815,7 @@ reflCtrls.dielectric.push(fRefl.addColor(params, 'reflSpecularColor').name('Spec
 
 reflCtrls.metal.push(fRefl.add(params, 'reflMetalness', 0.0, 1.0, 0.001).name('Metalness').onChange(syncMaterialFromParams));
 reflCtrls.metal.push(fRefl.addColor(params, 'reflMetalColor').name('Metal Color').onChange(syncMaterialFromParams));
+fRefl.add({ reload: () => loadReflectionAuto(true) }, 'reload').name('Reload map (mp4/img)');
 
 function setCtrlVisible(ctrl, visible) {
   const el = ctrl?.domElement;
@@ -890,7 +879,6 @@ let _presets = {};
 
 function rebuildPresetsDropdown(names) {
   const opts = (names.length ? names : ['(none)']);
-  // Update dropdown options in-place (supported by lil‑gui)
   if (presetsDrop && typeof presetsDrop.options === 'function') {
     presetsDrop.options(opts);
   } else {
@@ -1029,12 +1017,10 @@ function applyPreset(p) {
 }
 loadPresetsFile();
 
-// ---------- Reflection map loader (mp4 or image) with PMREM ----------
+// ---------- Reflection map loader (mp4 or image) with PMREM, guarded ----------
 async function exists(url) {
-  try {
-    const r = await fetch(url, { method: 'HEAD', cache: 'no-store' });
-    return r.ok;
-  } catch { return false; }
+  try { const r = await fetch(url, { method: 'HEAD', cache: 'no-store' }); return r.ok; }
+  catch { return false; }
 }
 function disposeActiveEnvRT(keepDefault = true) {
   if (activeEnvRT && activeEnvRT !== defaultEnvRT) {
@@ -1043,12 +1029,65 @@ function disposeActiveEnvRT(keepDefault = true) {
     activeEnvRT.dispose();
   }
 }
-async function applyPMREMFromTexture(tex) {
-  tex.mapping = THREE.EquirectangularReflectionMapping;
-  const rt = pmrem.fromEquirectangular(tex);
+function setSceneEnvFromPMREM(rt) {
+  if (!rt || !rt.texture) return false;
   scene.environment = rt.texture;
   disposeActiveEnvRT();
   activeEnvRT = rt;
+  return true;
+}
+function setSceneEnvRaw(tex) {
+  if (!tex) return false;
+  scene.environment = tex;
+  disposeActiveEnvRT(); // drop any previous PMREM to avoid leaks
+  activeEnvRT = defaultEnvRT; // keep default handle (not disposed)
+  return true;
+}
+async function waitForVideoDimensions(video) {
+  if (video.videoWidth > 0 && video.videoHeight > 0) return;
+  await new Promise((resolve) => {
+    const check = () => {
+      if (video.videoWidth > 0 && video.videoHeight > 0) {
+        cleanup(); resolve();
+      }
+    };
+    const cleanup = () => {
+      video.removeEventListener('loadedmetadata', check);
+      video.removeEventListener('loadeddata', check);
+      video.removeEventListener('resize', check);
+    };
+    video.addEventListener('loadedmetadata', check);
+    video.addEventListener('loadeddata', check);
+    video.addEventListener('resize', check);
+    // call once in case it's already ready
+    check();
+  });
+}
+async function makePMREMOrNull(tex) {
+  try {
+    if (!tex || !tex.image) return null;
+    let w = 0, h = 0;
+    const img = tex.image;
+    if (tex.isVideoTexture) { w = img.videoWidth || 0; h = img.videoHeight || 0; }
+    else { w = img.naturalWidth || img.width || 0; h = img.naturalHeight || img.height || 0; }
+    if (!(w > 0 && h > 0)) return null;
+    const rt = pmrem.fromEquirectangular(tex);
+    if (!rt || !isFinite(rt.width) || !isFinite(rt.height) || rt.width <= 0 || rt.height <= 0) {
+      rt?.dispose(); return null;
+    }
+    return rt;
+  } catch (e) {
+    console.warn('PMREM creation failed:', e);
+    return null;
+  }
+}
+async function applyEnvFromTexture(tex) {
+  if (!tex) return false;
+  tex.mapping = THREE.EquirectangularReflectionMapping;
+  const rt = await makePMREMOrNull(tex);
+  if (rt) return setSceneEnvFromPMREM(rt);
+  // Fallback to raw equirectangular (no crash; roughness less accurate)
+  return setSceneEnvRaw(tex);
 }
 async function applyReflectionFromImage(url) {
   const tex = await new Promise((resolve, reject) => {
@@ -1056,9 +1095,9 @@ async function applyReflectionFromImage(url) {
     loader.load(url, resolve, undefined, reject);
   });
   tex.colorSpace = THREE.SRGBColorSpace;
-  await applyPMREMFromTexture(tex);
   if (reflectionTex && reflectionTex.isTexture) reflectionTex.dispose();
   reflectionTex = tex;
+  await applyEnvFromTexture(reflectionTex);
 }
 async function applyReflectionFromVideo(url) {
   const video = document.createElement('video');
@@ -1072,14 +1111,20 @@ async function applyReflectionFromVideo(url) {
     const onErr = () => reject(new Error('Video load error'));
     video.addEventListener('error', onErr, { once: true });
     video.addEventListener('canplay', () => resolve(), { once: true });
-  });
+  }).catch(() => {});
+  // Ensure we have real dimensions before PMREM
   await video.play().catch(() => {});
+  await waitForVideoDimensions(video);
+
   const vtex = new THREE.VideoTexture(video);
   vtex.colorSpace = THREE.SRGBColorSpace;
-  await applyPMREMFromTexture(vtex); // initial PMREM
+  vtex.needsUpdate = true;
+
   if (reflectionTex && reflectionTex.isTexture) reflectionTex.dispose();
   reflectionTex = vtex;
   reflectionVideo = video;
+
+  await applyEnvFromTexture(reflectionTex);
 }
 async function loadReflectionAuto(logOn = false) {
   try {
@@ -1146,12 +1191,15 @@ function animate() {
   rgbShiftPass.uniforms['angle'].value  = rgbAngle;
   rgbShiftPass.uniforms['amount'].value = rgbAmt;
 
-  // Optional PMREM refresh for video env‑map
-  if (reflectionVideo && params.reflVideoUpdateHz > 0) {
+  // Optional PMREM refresh for video env‑map (only if a PMREM is currently in use)
+  if (reflectionVideo && params.reflVideoUpdateHz > 0 && activeEnvRT && activeEnvRT !== defaultEnvRT) {
     const sec = now / 1000;
     if (sec - lastVideoPmrem >= (1 / params.reflVideoUpdateHz)) {
       lastVideoPmrem = sec;
-      applyPMREMFromTexture(reflectionTex);
+      // Rebuild PMREM from the live video texture (guarded)
+      makePMREMOrNull(reflectionTex).then(rt => {
+        if (rt) setSceneEnvFromPMREM(rt);
+      });
     }
   }
 
