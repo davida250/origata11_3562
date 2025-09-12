@@ -7,8 +7,8 @@
         "count": 48,
         "amp": 0.90,
         "freq": 0.95,
-        "connectDist": 0.80,
-        "breakDist": 1.00
+        "connectDist": 1.05,
+        "breakDist": 1.30
       },
       "animation": {
         "play": true,
@@ -50,7 +50,7 @@
         "cellFreq": 2.75
       },
       "reflection": {
-        "mode": "dielectric",
+        "workflow": "dielectric",
         "flatShading": true,
         "envIntensity": 1.2,
         "roughness": 0.26,
@@ -74,8 +74,8 @@
         "count": 64,
         "amp": 0.75,
         "freq": 1.25,
-        "connectDist": 0.70,
-        "breakDist": 0.92
+        "connectDist": 1.00,
+        "breakDist": 1.25
       },
       "animation": {
         "play": true,
@@ -117,12 +117,12 @@
         "cellFreq": 2.40
       },
       "reflection": {
-        "mode": "metal",
+        "workflow": "metal",
         "flatShading": true,
         "envIntensity": 1.4,
         "roughness": 0.15,
         "metalness": 1.0,
-        "ior": 1.3,
+        "ior": 1.5,
         "specularIntensity": 1.0,
         "specularColor": "#ffffff",
         "metalColor": "#ffffff",
