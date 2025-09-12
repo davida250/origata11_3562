@@ -1,6 +1,11 @@
 // Origata — Brownian polygon surface + echo trails + luma‑preserving RGB + Presets
 // Reflection overhaul: full PBR controls + PMREM video/image loader + flat/smooth reflection shading
-// Built atop your latest code; overlay/glow/trails preserved.  :contentReference[oaicite:4]{index=4}
+// Fixes included:
+//  • Removed invalid gui.updateDisplay() calls (use controller.updateDisplay() per controller).
+//  • Presets dropdown rebuilt via controller.options(...), safe and idempotent.
+//  • Seeded proximity graph (k‑nearest neighbors) so triangles exist on frame 0 (no black screen).
+//  • Hysteresis edges preserved across frames (connect ≤, break ≥), so faces evolve organically.
+//  • Reflection map: MP4 or image with PMREM; optional periodic PMREM refresh for video env‑maps.
 
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
@@ -48,7 +53,7 @@ let reflectionVideo = null;         // HTMLVideoElement if using mp4
 let reflectionTex = null;           // THREE.VideoTexture or THREE.Texture
 let lastVideoPmrem = 0;
 
-// ---------- overlay shader (your original look preserved) ----------
+// ---------- overlay shader (original look preserved) ----------
 function injectOverlay(material) {
   const uniforms = {
     uTime:         { value: 0 },
@@ -190,22 +195,21 @@ class BrownianSurface {
     this.pos = null;   // Float32Array (N*3)
     this.vel = null;   // Float32Array (N*3)
     this.anc = null;   // Float32Array (N*3)
-    this.state = null; // Uint8Array (N*N) symmetric
+    this.state = null; // Uint8Array (N*N) symmetric — adjacency
 
-    this.tris = [];    // Array<[i,j,k]> referencing vertex indices in [0..N)
+    this.tris = [];    // Array<[i,j,k]>
 
-    // Material (physical with iridescence); reflection props will be synced from GUI
     this.material = new THREE.MeshPhysicalMaterial({
       color: 0x151515,
       roughness: 0.26,
       metalness: 0.0,
       envMapIntensity: 1.2,
-      ior: 1.3,                   // dielectric IOR
-      specularIntensity: 1.0,     // dielectric specular
+      ior: 1.3,
+      specularIntensity: 1.0,
       specularColor: new THREE.Color(0xffffff),
       clearcoat: 0.0,
       clearcoatRoughness: 0.2,
-      flatShading: true,          // “origami” by default
+      flatShading: true,
       side: THREE.DoubleSide
     });
     injectOverlay(this.material);
@@ -236,7 +240,11 @@ class BrownianSurface {
     this.state = new Uint8Array(n * n);
 
     this._initAnchorsFromSurface(this.surfaceType, this.surfaceJitter);
-    this._rebuildGeometry([]); // no triangles yet
+
+    // Seed initial connectivity so triangles exist at frame 0
+    this._seedInitialGraph(3); // k-nearest neighbors per vertex
+    const seededTris = this._computeTriangles();
+    this._rebuildGeometry(seededTris);
   }
 
   _initAnchorsFromSurface(type, jitter) {
@@ -290,6 +298,27 @@ class BrownianSurface {
       this.anc[o+0] = v.x; this.anc[o+1] = v.y; this.anc[o+2] = v.z;
       this.pos[o+0] = p.x; this.pos[o+1] = p.y; this.pos[o+2] = p.z;
       this.vel[o+0] = 0;   this.vel[o+1] = 0;   this.vel[o+2] = 0;
+    }
+  }
+
+  // One-shot: connect k nearest neighbors per vertex (symmetric), to avoid empty graph at t=0
+  _seedInitialGraph(k = 3) {
+    const N = this.N, P = this.pos, S = this.state;
+    for (let i = 0; i < N; i++) {
+      const ix = i*3, ax = P[ix], ay = P[ix+1], az = P[ix+2];
+      const nn = [];
+      for (let j = 0; j < N; j++) {
+        if (i === j) continue;
+        const jx = j*3;
+        const dx = P[jx] - ax, dy = P[jx+1] - ay, dz = P[jx+2] - az;
+        nn.push([j, dx*dx + dy*dy + dz*dz]);
+      }
+      nn.sort((a,b) => a[1] - b[1]);
+      const m = Math.min(k, nn.length);
+      for (let t = 0; t < m; t++) {
+        const j = nn[t][0];
+        S[i*N + j] = S[j*N + i] = 1;
+      }
     }
   }
 
@@ -347,14 +376,12 @@ class BrownianSurface {
     const posAttr = this.geometry.getAttribute('position');
     if (!posAttr) return;
 
-    // write positions for all vertices (shared)
     for (let i = 0; i < this.N; i++) {
       const pi = i * 3;
       posAttr.setXYZ(i, this.pos[pi+0], this.pos[pi+1], this.pos[pi+2]);
     }
     posAttr.needsUpdate = true;
 
-    // Smooth normals if needed (for reflection spread across faces)
     if (!this.material.flatShading) {
       this.geometry.computeVertexNormals();
       const nrmAttr = this.geometry.getAttribute('normal');
@@ -363,7 +390,7 @@ class BrownianSurface {
   }
 
   update(dt, now) {
-    // Motion (OU-like around anchors)
+    // OU-like motion around anchors
     const N = this.N;
     const { amp, freq } = this.params;
     const beta = THREE.MathUtils.clamp(1.2 * freq + 0.2, 0, 12);
@@ -395,29 +422,46 @@ class BrownianSurface {
       this.pos[o+0] = nxp; this.pos[o+1] = nyp; this.pos[o+2] = nzp;
     }
 
-    // Proximity edges with hysteresis
-    const onR  = this.params.connectDist, offR = Math.max(this.params.breakDist, onR + 1e-4);
-    const S = this.state.fill(0);
+    // Proximity edges with hysteresis — preserve previous S, then toggle edges
+    const S = this.state;
+    const onR  = this.params.connectDist;
+    const offR = Math.max(this.params.breakDist, onR + 1e-4);
 
     for (let i = 0; i < N; i++) {
-      const ix = i * 3; const pix = this.pos[ix], piy = this.pos[ix+1], piz = this.pos[ix+2];
+      const ix = i * 3; const ax = this.pos[ix], ay = this.pos[ix+1], az = this.pos[ix+2];
       for (let j = i + 1; j < N; j++) {
-        const jx = j * 3; const pjx = this.pos[jx], pjy = this.pos[jx+1], pjz = this.pos[jx+2];
-        const dx = pjx - pix, dy = pjy - piy, dz = pjz - piz; const d = Math.sqrt(dx*dx + dy*dy + dz*dz);
-        if (d <= onR) { S[i*N+j] = S[j*N+i] = 1; }
+        const jx = j * 3; const bx = this.pos[jx], by = this.pos[jx+1], bz = this.pos[jx+2];
+        const dx = bx-ax, dy = by-ay, dz = bz-az;
+        const d  = Math.sqrt(dx*dx + dy*dy + dz*dz);
+        const idx = i*N + j;
+        const on  = S[idx] === 1;
+        if (!on && d <= onR)       { S[i*N+j] = S[j*N+i] = 1; }
+        else if (on && d >= offR)  { S[i*N+j] = S[j*N+i] = 0; }
       }
     }
 
     // Triangles = 3‑cliques of S
     const tris = this._computeTriangles();
 
-    // Rebuild index buffer if tri count changed
-    if (tris.length !== this.tris.length) this._rebuildGeometry(tris);
-    else this.tris = tris;
+    // Rebuild or update indices
+    const idxAttr = this.geometry.getIndex();
+    if (!idxAttr || idxAttr.count !== tris.length * 3) {
+      this._rebuildGeometry(tris);
+    } else {
+      for (let t = 0; t < tris.length; t++) {
+        const [a,b,c] = tris[t];
+        const base = t * 3;
+        idxAttr.setX(base + 0, a);
+        idxAttr.setX(base + 1, b);
+        idxAttr.setX(base + 2, c);
+      }
+      idxAttr.needsUpdate = true;
+      this.tris = tris;
+    }
 
-    if (this.tris.length > 0) this._updatePositionsAndNormals();
+    if (tris.length > 0) this._updatePositionsAndNormals();
 
-    // Drive overlay time + presentation rotation
+    // Overlay time + presentation rotation
     const uniforms = this.material.userData._overlayUniforms;
     if (uniforms) uniforms.uTime.value = now;
     const yaw   = 0.22 * Math.sin(2 * Math.PI * 0.03 * now);
@@ -439,7 +483,7 @@ const composer = new EffectComposer(renderer);
 const renderPass = new RenderPass(scene, camera);
 composer.addPass(renderPass);
 
-// Save current frame (for trail composition)
+// Save current crisp frame (for trail composition)
 const saveBaseRT = new THREE.WebGLRenderTarget(container.clientWidth, container.clientHeight, { depthBuffer: false, stencilBuffer: false });
 const saveBasePass = new SavePass(saveBaseRT);
 saveBasePass.enabled = false;
@@ -578,6 +622,7 @@ const uiHost = document.getElementById('ui');
 const gui = new GUI({ title: 'Controls', width: 320 });
 uiHost.appendChild(gui.domElement);
 
+// Core params
 const params = {
   // Brownian surface
   primitive:     'sphere',  // 'sphere' | 'cube' | 'torus'
@@ -616,16 +661,16 @@ const params = {
   rgbPulseAmp:   0.0,
   rgbPulseHz:    0.5,
 
-  // Reflection material
+  // Reflection material (PBR)
   reflMode: 'dielectric',        // 'dielectric' | 'metal'
   reflFlatShading: true,         // keep origami by default
   reflEnvIntensity: 1.2,         // envMapIntensity
   reflRoughness: 0.26,           // “spread”
-  reflMetalness: 0.0,            // only used in metal mode (0..1)
-  reflIOR: 1.3,                  // dielectric index of refraction
-  reflSpecularIntensity: 1.0,    // dielectric specular (0..1)
+  reflMetalness: 0.0,            // metal workflow (0..1)
+  reflIOR: 1.3,                  // dielectric index
+  reflSpecularIntensity: 1.0,    // dielectric specular intensity
   reflSpecularColor: '#ffffff',  // dielectric specular tint
-  reflMetalColor: '#ffffff',     // metal base color (chrome=white)
+  reflMetalColor: '#ffffff',     // metal base color (chrome≈white)
   reflClearcoat: 0.0,
   reflClearcoatRoughness: 0.2,
   reflVideoUpdateHz: 0.0,        // 0 = static; >0 = re-PMREM video N times/sec
@@ -639,6 +684,17 @@ const params = {
   }
 };
 
+const surface = new BrownianSurface({
+  surfaceType: params.primitive,
+  surfaceJitter: params.surfaceJitter,
+  count: params.count,
+  amp: params.amp,
+  freq: params.freq,
+  connectDist: params.connectDist,
+  breakDist: params.breakDist
+});
+
+// Sync MeshPhysicalMaterial from params
 function syncMaterialFromParams() {
   const mat = surface.material;
   mat.envMapIntensity    = params.reflEnvIntensity;
@@ -646,8 +702,8 @@ function syncMaterialFromParams() {
   mat.clearcoat          = params.reflClearcoat;
   mat.clearcoatRoughness = params.reflClearcoatRoughness;
   mat.flatShading        = params.reflFlatShading;
-  mat.ior                = params.reflIOR;                  // dielectric reflectance control
-  mat.specularIntensity  = params.reflSpecularIntensity;    // dielectric “mirror” strength
+  mat.ior                = params.reflIOR;
+  mat.specularIntensity  = params.reflSpecularIntensity;
   mat.specularColor.set(params.reflSpecularColor);
 
   if (params.reflMode === 'metal') {
@@ -660,44 +716,52 @@ function syncMaterialFromParams() {
   mat.needsUpdate = true;
   surface.setFlatShading(params.reflFlatShading);
 }
-
-// Build surface
-const surface = new BrownianSurface({
-  surfaceType: params.primitive,
-  surfaceJitter: params.surfaceJitter,
-  count: params.count,
-  amp: params.amp,
-  freq: params.freq,
-  connectDist: params.connectDist,
-  breakDist: params.breakDist
-});
 syncMaterialFromParams();
 
-// --- Folders ---
+// --- Presets (JSON) ---
+const fPresets = gui.addFolder('Presets');
+const presetsCtl = {
+  selected: '(none)',
+  load: () => { if (presetsCtl.selected in _presets) applyPreset(_presets[presetsCtl.selected]); },
+  reload: () => loadPresetsFile()
+};
+let presetsDrop = fPresets.add(presetsCtl, 'selected', ['(none)']).name('Select');
+fPresets.add(presetsCtl, 'load').name('Load Selected');
+fPresets.add(presetsCtl, 'reload').name('Reload presets.json');
+
+// Surface source
 const fSrc = gui.addFolder('Surface Source');
 fSrc.add(params, 'primitive', { Sphere: 'sphere', Cube: 'cube', Torus: 'torus' })
    .name('Primitive').onChange(v => surface.setSurfaceType(v));
 fSrc.add(params, 'surfaceJitter', 0.0, 0.6, 0.001).name('± Offset')
     .onFinishChange(v => surface.setSurfaceJitter(v));
 
+// Brownian Surface
 const fSys = gui.addFolder('Brownian Surface');
-const breakCtrl = fSys.add(params, 'breakDist', 0.05, 2.0, 0.001).name('Break (≥)').onChange(v => {
-  surface.params.breakDist = Math.max(v, params.connectDist);
-  params.breakDist = surface.params.breakDist;
-  breakCtrl.updateDisplay();
-});
+let breakCtrl;
 fSys.add(params, 'count', 4, 200, 1).name('Vertices').onFinishChange(v => surface.setCount(v));
 fSys.add(params, 'amp', 0.0, 2.0, 0.001).name('Amplitude').onChange(v => surface.params.amp = v);
 fSys.add(params, 'freq', 0.0, 3.0, 0.001).name('Frequency').onChange(v => surface.params.freq = v);
-fSys.add(params, 'connectDist', 0.05, 2.0, 0.001).name('Connect (≤)').onChange(v => {
+const connectCtrl = fSys.add(params, 'connectDist', 0.05, 2.0, 0.001).name('Connect (≤)').onChange(v => {
   surface.params.connectDist = v;
-  if (params.breakDist < v) { params.breakDist = v; surface.params.breakDist = v; breakCtrl.updateDisplay(); }
+  if (params.breakDist < v) {
+    params.breakDist = v;
+    surface.params.breakDist = v;
+    if (breakCtrl && typeof breakCtrl.updateDisplay === 'function') breakCtrl.updateDisplay();
+  }
+});
+breakCtrl = fSys.add(params, 'breakDist', 0.05, 2.0, 0.001).name('Break (≥)').onChange(v => {
+  surface.params.breakDist = Math.max(v, params.connectDist);
+  params.breakDist = surface.params.breakDist;
+  if (typeof breakCtrl.updateDisplay === 'function') breakCtrl.updateDisplay();
 });
 
+// Animation
 const fAnim = gui.addFolder('Animation');
 fAnim.add(params, 'play').name('Play / Pause');
 fAnim.add(params, 'timeScale', 0.0, 3.0, 0.01).name('Time Scale');
 
+// Glow (Bloom)
 const fGlow = gui.addFolder('Glow (Bloom)');
 fGlow.add(params, 'bloomStrength', 0.0, 2.5, 0.01).name('Strength').onChange(v => {
   bloomPass.strength = v;
@@ -706,6 +770,7 @@ fGlow.add(params, 'bloomStrength', 0.0, 2.5, 0.01).name('Strength').onChange(v =
 fGlow.add(params, 'bloomThreshold', 0.0, 1.0, 0.001).name('Threshold').onChange(v => bloomPass.threshold = v);
 fGlow.add(params, 'bloomRadius', 0.0, 1.0, 0.001).name('Radius').onChange(v => bloomPass.radius = v);
 
+// Trails (Echoes)
 const fTrail = gui.addFolder('Trails (Echoes)');
 fTrail.add(params, 'trailEnabled').name('Enable').onChange(updateTrailEnabled);
 fTrail.add(params, 'trailPersistence', 0.0, 99.9, 0.1).name('Persistence (%)');
@@ -717,6 +782,7 @@ fTrail.add(params, 'trailGamma', 0.5, 2.5, 0.01).name('Echo Gamma').onChange(upd
 fTrail.add(params, 'trailSaturation', 0.0, 2.0, 0.01).name('Echo Saturation').onChange(updateTrailUniforms);
 fTrail.add(params, 'trailClear').name('Clear Trails');
 
+// RGB offset (luma‑neutral)
 const fRGB = gui.addFolder('RGB Offset (Luma‑neutral)');
 fRGB.add(params, 'rgbAmount', 0.0, 0.10, 0.0001).name('Amount').onChange(updateRGBEnabled);
 fRGB.add(params, 'rgbAngle', 0.0, 360.0, 0.1).name('Angle (°)')
@@ -726,9 +792,9 @@ fRGB.add(params, 'rgbSpinHz', 0.0, 3.0, 0.001).name('Spin (Hz)');
 fRGB.add(params, 'rgbPulseAmp', 0.0, 0.10, 0.0001).name('Pulse Amp').onChange(updateRGBEnabled);
 fRGB.add(params, 'rgbPulseHz', 0.0, 5.0, 0.001).name('Pulse (Hz)');
 
-// === Reflection (new) ===
+// Reflection (PBR)
 const fRefl = gui.addFolder('Reflection (PBR)');
-fRefl.add(params, 'reflMode', { Dielectric: 'dielectric', Metal: 'metal' }).name('Workflow').onChange(syncMaterialFromParams);
+fRefl.add(params, 'reflMode', { Dielectric: 'dielectric', Metal: 'metal' }).name('Workflow').onChange(() => { syncMaterialFromParams(); toggleReflUI(); });
 fRefl.add(params, 'reflFlatShading').name('Origami (Flat)').onChange(syncMaterialFromParams);
 fRefl.add(params, 'reflEnvIntensity', 0.0, 3.0, 0.01).name('Env Intensity').onChange(syncMaterialFromParams);
 fRefl.add(params, 'reflRoughness', 0.0, 1.0, 0.001).name('Spread (Roughness)').onChange(syncMaterialFromParams);
@@ -740,6 +806,7 @@ const specCol   = fRefl.addColor(params, 'reflSpecularColor').name('Specular Col
 fRefl.add(params, 'reflClearcoat', 0.0, 1.0, 0.001).name('Clearcoat').onChange(syncMaterialFromParams);
 fRefl.add(params, 'reflClearcoatRoughness', 0.0, 1.0, 0.001).name('Coat Roughness').onChange(syncMaterialFromParams);
 fRefl.add(params, 'reflVideoUpdateHz', 0.0, 12.0, 0.1).name('Video PMREM Hz');
+fRefl.add({ reload: () => loadReflectionAuto(true) }, 'reload').name('Reload map (mp4/img)');
 
 function toggleReflUI() {
   const isMetal = (params.reflMode === 'metal');
@@ -750,16 +817,29 @@ function toggleReflUI() {
   specCol.domElement.parentElement.style.display   = !isMetal ? '' : 'none';
 }
 toggleReflUI();
-fRefl.controllers.forEach(c => {
-  if (c.property === 'reflMode') c.onChange(() => { toggleReflUI(); });
-});
 
 // View
 const fView = gui.addFolder('View');
 fView.add(params, 'exposure', 0.6, 1.8, 0.01).name('Exposure').onChange(v => renderer.toneMappingExposure = v);
 fView.add(params, 'resetCamera').name('Reset Camera');
 
-// ---------- helpers ----------
+// Overlay advanced controls
+const surfaceAdv = { angle: 28, angle2: 82, speed: 0.25, freq1: 6.0, freq2: 9.5, strength: 0.52, triScale: 1.15, warp: 0.55, cellAmp: 0.55, cellFreq: 2.75 };
+const U = () => surface?.mesh.material.userData._overlayUniforms;
+const fSurfaceAdv = gui.addFolder('Surface (Advanced)');
+fSurfaceAdv.add(surfaceAdv, 'angle', 0, 180, 0.1).name('Stripe Angle (°)').onChange(v => { const u = U(); if (u) u.uBandAngle.value  = THREE.MathUtils.degToRad(v); });
+fSurfaceAdv.add(surfaceAdv, 'angle2', 0, 180, 0.1).name('Stripe2 Angle (°)').onChange(v => { const u = U(); if (u) u.uBandAngle2.value = THREE.MathUtils.degToRad(v); });
+fSurfaceAdv.add(surfaceAdv, 'speed', 0, 2, 0.001).name('Stripe Rot Speed').onChange(v => { const u = U(); if (u) u.uBandSpeed.value = v; });
+fSurfaceAdv.add(surfaceAdv, 'freq1', 1, 20, 0.1).name('Stripe Freq 1').onChange(v => { const u = U(); if (u) u.uBandFreq1.value = v; });
+fSurfaceAdv.add(surfaceAdv, 'freq2', 1, 20, 0.1).name('Stripe Freq 2').onChange(v => { const u = U(); if (u) u.uBandFreq2.value = v; });
+fSurfaceAdv.add(surfaceAdv, 'strength', 0, 1, 0.01).name('Emissive Strength').onChange(v => { const u = U(); if (u) u.uBandStrength.value = v; });
+fSurfaceAdv.add(surfaceAdv, 'triScale', 0.2, 4, 0.01).name('Tri-Planar Scale').onChange(v => { const u = U(); if (u) u.uTriScale.value = v; });
+fSurfaceAdv.add(surfaceAdv, 'warp', 0, 1.5, 0.01).name('Domain Warp').onChange(v => { const u = U(); if (u) u.uWarp.value = v; });
+fSurfaceAdv.add(surfaceAdv, 'cellAmp', 0, 1, 0.01).name('Cellular Mix').onChange(v => { const u = U(); if (u) u.uCellAmp.value = v; });
+fSurfaceAdv.add(surfaceAdv, 'cellFreq', 0.5, 8, 0.01).name('Cellular Freq').onChange(v => { const u = U(); if (u) u.uCellFreq.value = v; });
+fSurfaceAdv.close();
+
+// helpers
 function updateTrailUniforms() {
   trailCompositePass.uniforms.uGain.value        = params.trailGain;
   trailCompositePass.uniforms.uGamma.value       = params.trailGamma;
@@ -781,6 +861,161 @@ function updateRGBEnabled() {
 updateTrailEnabled();
 updateRGBEnabled();
 
+// ---------- Presets (JSON) ----------
+const PRESETS_URL = 'presets.json';
+let _presets = {};
+
+function rebuildPresetsDropdown(names) {
+  const opts = (names.length ? names : ['(none)']);
+  if (!presetsDrop) {
+    presetsDrop = fPresets.add(presetsCtl, 'selected', opts).name('Select');
+  } else if (typeof presetsDrop.options === 'function') {
+    presetsDrop = presetsDrop.options(opts); // lil-gui: options(...) updates choices
+  } else {
+    presetsDrop = fPresets.add(presetsCtl, 'selected', opts).name('Select');
+  }
+  if (!opts.includes(presetsCtl.selected)) presetsCtl.selected = opts[0];
+  if (typeof presetsDrop.updateDisplay === 'function') presetsDrop.updateDisplay();
+}
+
+function ingestPresetsData(data) {
+  const map = data?.presets || {};
+  _presets = map;
+  const names = Object.keys(_presets);
+  try {
+    rebuildPresetsDropdown(names);
+    console.info(`[presets] Loaded ${names.length} preset(s).`);
+  } catch (uiErr) {
+    console.warn('[presets] UI rebuild error:', uiErr);
+  }
+}
+
+async function loadPresetsFile() {
+  let data;
+  try {
+    const url = `${PRESETS_URL}?t=${Date.now()}`;
+    const res = await fetch(url, { cache: 'no-store' });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    data = await res.json();
+  } catch (netErr) {
+    console.warn(`[presets] Network/parse error for ${PRESETS_URL}:`, netErr);
+    try { rebuildPresetsDropdown([]); } catch {}
+    return;
+  }
+  ingestPresetsData(data);
+}
+
+function refreshAllControllers(root) {
+  // refresh visible values without using gui.updateDisplay()
+  if (!root) return;
+  if (Array.isArray(root.controllers)) {
+    root.controllers.forEach(c => c.updateDisplay && c.updateDisplay());
+  }
+  // lil‑gui stores folders in .children; recurse into folders
+  if (Array.isArray(root.children)) {
+    root.children.forEach(f => refreshAllControllers(f));
+  }
+}
+
+function applyPreset(p) {
+  if (!p) return;
+  // Surface
+  if (p.surface) {
+    if (typeof p.surface.primitive === 'string') { params.primitive = p.surface.primitive; surface.setSurfaceType(params.primitive); }
+    if (isFinite(p.surface.surfaceJitter)) { params.surfaceJitter = p.surface.surfaceJitter; surface.setSurfaceJitter(params.surfaceJitter); }
+    if (isFinite(p.surface.count)) { params.count = Math.floor(p.surface.count); surface.setCount(params.count); }
+    if (isFinite(p.surface.amp)) { params.amp = p.surface.amp; surface.params.amp = params.amp; }
+    if (isFinite(p.surface.freq)) { params.freq = p.surface.freq; surface.params.freq = params.freq; }
+    if (isFinite(p.surface.connectDist)) { params.connectDist = p.surface.connectDist; surface.params.connectDist = params.connectDist; }
+    if (isFinite(p.surface.breakDist)) { params.breakDist = Math.max(p.surface.breakDist, params.connectDist); surface.params.breakDist = params.breakDist; }
+  }
+  // Animation
+  if (p.animation) {
+    if (typeof p.animation.play === 'boolean') params.play = p.animation.play;
+    if (isFinite(p.animation.timeScale)) params.timeScale = p.animation.timeScale;
+  }
+  // Bloom
+  if (p.bloom) {
+    if (isFinite(p.bloom.bloomStrength)) { params.bloomStrength = p.bloom.bloomStrength; bloomPass.strength = params.bloomStrength; bloomPass.enabled = params.bloomStrength > 0.0; }
+    if (isFinite(p.bloom.bloomThreshold)) { params.bloomThreshold = p.bloom.bloomThreshold; bloomPass.threshold = params.bloomThreshold; }
+    if (isFinite(p.bloom.bloomRadius)) { params.bloomRadius = p.bloom.bloomRadius; bloomPass.radius = params.bloomRadius; }
+  }
+  // Trails
+  if (p.trails) {
+    if (typeof p.trails.trailEnabled === 'boolean') params.trailEnabled = p.trails.trailEnabled;
+    if (isFinite(p.trails.trailPersistence)) params.trailPersistence = p.trails.trailPersistence;
+    if (isFinite(p.trails.trailHalfLife))    params.trailHalfLife    = p.trails.trailHalfLife;
+    if (isFinite(p.trails.trailBlurPx))      params.trailBlurPx      = p.trails.trailBlurPx;
+    if (isFinite(p.trails.trailBlurSigma))   params.trailBlurSigma   = p.trails.trailBlurSigma;
+    if (isFinite(p.trails.trailGain))        params.trailGain        = p.trails.trailGain;
+    if (isFinite(p.trails.trailGamma))       params.trailGamma       = p.trails.trailGamma;
+    if (isFinite(p.trails.trailSaturation))  params.trailSaturation  = p.trails.trailSaturation;
+    updateTrailEnabled(); updateTrailUniforms();
+  }
+  // RGB offset
+  if (p.rgb) {
+    if (isFinite(p.rgb.rgbAmount))     params.rgbAmount   = p.rgb.rgbAmount;
+    if (isFinite(p.rgb.rgbAngle))      params.rgbAngle    = p.rgb.rgbAngle;
+    if (typeof p.rgb.rgbAnimate === 'boolean') params.rgbAnimate = p.rgb.rgbAnimate;
+    if (isFinite(p.rgb.rgbSpinHz))     params.rgbSpinHz   = p.rgb.rgbSpinHz;
+    if (isFinite(p.rgb.rgbPulseAmp))   params.rgbPulseAmp = p.rgb.rgbPulseAmp;
+    if (isFinite(p.rgb.rgbPulseHz))    params.rgbPulseHz  = p.rgb.rgbPulseHz;
+    updateRGBEnabled();
+    rgbShiftPass.uniforms['angle'].value = THREE.MathUtils.degToRad(params.rgbAngle);
+  }
+  // Overlay
+  if (p.overlay) {
+    surfaceAdv.angle    = p.overlay.angle    ?? surfaceAdv.angle;
+    surfaceAdv.angle2   = p.overlay.angle2   ?? surfaceAdv.angle2;
+    surfaceAdv.speed    = p.overlay.speed    ?? surfaceAdv.speed;
+    surfaceAdv.freq1    = p.overlay.freq1    ?? surfaceAdv.freq1;
+    surfaceAdv.freq2    = p.overlay.freq2    ?? surfaceAdv.freq2;
+    surfaceAdv.strength = p.overlay.strength ?? surfaceAdv.strength;
+    surfaceAdv.triScale = p.overlay.triScale ?? surfaceAdv.triScale;
+    surfaceAdv.warp     = p.overlay.warp     ?? surfaceAdv.warp;
+    surfaceAdv.cellAmp  = p.overlay.cellAmp  ?? surfaceAdv.cellAmp;
+    surfaceAdv.cellFreq = p.overlay.cellFreq ?? surfaceAdv.cellFreq;
+    const u = U();
+    if (u) {
+      u.uBandAngle.value    = THREE.MathUtils.degToRad(surfaceAdv.angle);
+      u.uBandAngle2.value   = THREE.MathUtils.degToRad(surfaceAdv.angle2);
+      u.uBandSpeed.value    = surfaceAdv.speed;
+      u.uBandFreq1.value    = surfaceAdv.freq1;
+      u.uBandFreq2.value    = surfaceAdv.freq2;
+      u.uBandStrength.value = surfaceAdv.strength;
+      u.uTriScale.value     = surfaceAdv.triScale;
+      u.uWarp.value         = surfaceAdv.warp;
+      u.uCellAmp.value      = surfaceAdv.cellAmp;
+      u.uCellFreq.value     = surfaceAdv.cellFreq;
+    }
+  }
+  // Reflection (PBR)
+  if (p.reflection) {
+    if (typeof p.reflection.mode === 'string') params.reflMode = p.reflection.mode;
+    if (typeof p.reflection.flatShading === 'boolean') params.reflFlatShading = p.reflection.flatShading;
+    if (isFinite(p.reflection.envIntensity)) params.reflEnvIntensity = p.reflection.envIntensity;
+    if (isFinite(p.reflection.roughness))    params.reflRoughness    = p.reflection.roughness;
+    if (isFinite(p.reflection.metalness))    params.reflMetalness    = p.reflection.metalness;
+    if (isFinite(p.reflection.ior))          params.reflIOR          = p.reflection.ior;
+    if (isFinite(p.reflection.specularIntensity)) params.reflSpecularIntensity = p.reflection.specularIntensity;
+    if (typeof p.reflection.specularColor === 'string') params.reflSpecularColor = p.reflection.specularColor;
+    if (typeof p.reflection.metalColor === 'string')    params.reflMetalColor    = p.reflection.metalColor;
+    if (isFinite(p.reflection.clearcoat))          params.reflClearcoat          = p.reflection.clearcoat;
+    if (isFinite(p.reflection.clearcoatRoughness)) params.reflClearcoatRoughness = p.reflection.clearcoatRoughness;
+    if (isFinite(p.reflection.videoPmremHz))       params.reflVideoUpdateHz      = p.reflection.videoPmremHz;
+    syncMaterialFromParams();
+    toggleReflUI();
+  }
+  // View
+  if (p.view && isFinite(p.view.exposure)) {
+    params.exposure = p.view.exposure;
+    renderer.toneMappingExposure = params.exposure;
+  }
+  // GUI repaint
+  refreshAllControllers(gui);
+}
+loadPresetsFile();
+
 // ---------- Reflection map loader (mp4 or image) with PMREM ----------
 async function exists(url) {
   try {
@@ -796,7 +1031,6 @@ function disposeActiveEnvRT(keepDefault = true) {
   }
 }
 async function applyPMREMFromTexture(tex) {
-  // Ensure equirect mapping
   tex.mapping = THREE.EquirectangularReflectionMapping;
   const rt = pmrem.fromEquirectangular(tex);
   scene.environment = rt.texture;
@@ -809,7 +1043,7 @@ async function applyReflectionFromImage(url) {
     loader.load(url, resolve, undefined, reject);
   });
   tex.colorSpace = THREE.SRGBColorSpace;
-  await applyPMREMFromTexture(tex); // PMREM for proper IBL. :contentReference[oaicite:5]{index=5}
+  await applyPMREMFromTexture(tex);
   if (reflectionTex && reflectionTex.isTexture) reflectionTex.dispose();
   reflectionTex = tex;
 }
@@ -829,7 +1063,7 @@ async function applyReflectionFromVideo(url) {
   await video.play().catch(() => {});
   const vtex = new THREE.VideoTexture(video);
   vtex.colorSpace = THREE.SRGBColorSpace;
-  await applyPMREMFromTexture(vtex);      // initial PMREM; we’ll refresh at Hz if requested. :contentReference[oaicite:6]{index=6}
+  await applyPMREMFromTexture(vtex); // initial PMREM; can refresh at Hz below
   if (reflectionTex && reflectionTex.isTexture) reflectionTex.dispose();
   reflectionTex = vtex;
   reflectionVideo = video;
@@ -899,12 +1133,11 @@ function animate() {
   rgbShiftPass.uniforms['angle'].value  = rgbAngle;
   rgbShiftPass.uniforms['amount'].value = rgbAmt;
 
-  // Optional PMREM refresh for video env‑map (so reflections update)
+  // Optional PMREM refresh for video env‑map
   if (reflectionVideo && params.reflVideoUpdateHz > 0) {
     const sec = now / 1000;
     if (sec - lastVideoPmrem >= (1 / params.reflVideoUpdateHz)) {
       lastVideoPmrem = sec;
-      // regenerate PMREM from current video frame (costly; keep Hz modest)
       applyPMREMFromTexture(reflectionTex);
     }
   }
