@@ -1,11 +1,14 @@
 // Origata — Brownian polygon surface + echo trails + luma‑preserving RGB + Presets + Reflection Map + Intensity Control
 // --------------------------------------------------------------------------------------------------------------------
-// Base taken from your last working build (post chain fix, bright base + fading echoes, surface-anchored points).  :contentReference[oaicite:1]{index=1}
+// Built from your last working main.js, retaining glow/overlay/echo trails. :contentReference[oaicite:1]{index=1}
 //
-// What’s new:
-//  • Presets robustness: auto‑load presets.json when served over http(s); if opening via file://, use the built‑in file picker.
-//  • Reflection control: slider to adjust reflection intensity (envMapIntensity) live, for both image and video envs.
-//  • Minor: optional auto‑apply first preset on load; dropdown rebuilt reliably.
+// Fixes:
+//  • Presets dropdown rebuild now uses controller.options(...) instead of folder.remove(...) (lil‑gui API). :contentReference[oaicite:2]{index=2}
+//  • Removed local file picker flow (only loads ./presets.json via fetch()).
+//  • Added "Reflection → Intensity" slider (envMapIntensity).
+//
+// Notes:
+//  • If reflection.mp4 404s, we fall back to reflection.{jpg|jpeg|png|webp}. No crash if none exist.
 
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
@@ -48,9 +51,9 @@ controls.maxDistance = 9.0;
 const pmrem = new THREE.PMREMGenerator(renderer);
 const defaultEnvRT = pmrem.fromScene(new RoomEnvironment(), 0.04);
 scene.environment = defaultEnvRT.texture;
-let activeEnvRT = defaultEnvRT;     // dispose if we replace
-let reflectionVideo = null;         // HTMLVideoElement for mp4 env
-let reflectionTex = null;           // Texture/VideoTexture for cleanup
+let activeEnvRT = defaultEnvRT;     // keep track so we can dispose previous custom RTs
+let reflectionVideo = null;         // HTMLVideoElement, if using video map
+let reflectionTex = null;           // THREE.VideoTexture or THREE.Texture
 
 // ---------- overlay shader (unchanged look) ----------
 function injectOverlay(material) {
@@ -203,7 +206,7 @@ class BrownianSurface {
       color: 0x151515,
       roughness: 0.26,
       metalness: 0.0,
-      envMapIntensity: 1.2, // will be overridden by UI slider after construction
+      envMapIntensity: 1.2,
       iridescence: 1.0,
       iridescenceIOR: 1.3,
       iridescenceThicknessRange: [120, 620],
@@ -492,7 +495,7 @@ const TrailCompositeShader = {
     varying vec2 vUv;
 
     vec3 blur9(sampler2D tex, vec2 uv){
-      float sigma = max(uBlurSigma, 1e-4);
+      float sigma = max(uBlurSigma, 1.0e-4);
       float w0 = 1.0;
       float w1 = exp(-0.5 * pow(1.0/sigma, 2.0));
       float w2 = exp(-0.5 * pow(1.41421356237/sigma, 2.0));
@@ -650,20 +653,16 @@ const surface = new BrownianSurface({
   breakDist: params.breakDist
 });
 
-// --- GUI folders (incl. Presets + Reflection) ---
+// --- GUI folders ---
 const fPresets = gui.addFolder('Presets');
 const presetsCtl = {
   selected: '(none)',
-  load: () => { if (presetsCtl.selected in _presets) applyPreset(_presets[presetsCtl.selected], true); },
-  reload: () => loadPresetsFile(true),
-  openLocal: () => _hiddenPicker.click(),
-  autoApplyFirst: true
+  load: () => { if (presetsCtl.selected in _presets) applyPreset(_presets[presetsCtl.selected]); },
+  reload: () => loadPresetsFile()
 };
 let presetsDrop = fPresets.add(presetsCtl, 'selected', ['(none)']).name('Select');
 fPresets.add(presetsCtl, 'load').name('Load Selected');
 fPresets.add(presetsCtl, 'reload').name('Reload presets.json');
-fPresets.add(presetsCtl, 'openLocal').name('Open local presets.json…');
-fPresets.add(presetsCtl, 'autoApplyFirst').name('Auto‑apply first');
 
 const fSrc = gui.addFolder('Surface Source');
 fSrc.add(params, 'primitive', { Sphere: 'sphere', Cube: 'cube', Torus: 'torus' })
@@ -775,61 +774,41 @@ updateReflectionIntensity();
 // ---------- Presets (JSON) ----------
 const PRESETS_URL = 'presets.json';
 let _presets = {};
-const _hiddenPicker = document.createElement('input');
-_hiddenPicker.type = 'file';
-_hiddenPicker.accept = '.json,application/json';
-_hiddenPicker.style.display = 'none';
-document.body.appendChild(_hiddenPicker);
-_hiddenPicker.addEventListener('change', (e) => {
-  const f = _hiddenPicker.files && _hiddenPicker.files[0];
-  if (!f) return;
-  const reader = new FileReader();
-  reader.onload = () => {
-    try {
-      const data = JSON.parse(reader.result);
-      ingestPresetsData(data, /*autoApply=*/true);
-    } catch (err) { console.warn('[presets] Local parse error:', err); }
-  };
-  reader.readAsText(f);
-});
 
-function rebuildPresetsDropdown(names, autoApply) {
+function rebuildPresetsDropdown(names) {
   const opts = (names.length ? names : ['(none)']);
-  if (presetsDrop) fPresets.remove(presetsDrop);
-  presetsCtl.selected = opts[0];
-  presetsDrop = fPresets.add(presetsCtl, 'selected', opts).name('Select');
-  if (autoApply && names.length && presetsCtl.autoApplyFirst) {
-    applyPreset(_presets[opts[0]], true);
+  if (presetsDrop && typeof presetsDrop.options === 'function') {
+    // Safe way to update choices without removing controller. :contentReference[oaicite:3]{index=3}
+    presetsDrop.options(opts);
+  } else {
+    presetsDrop = fPresets.add(presetsCtl, 'selected', opts).name('Select');
   }
+  presetsCtl.selected = opts[0];
+  gui.updateDisplay();
 }
 
-function ingestPresetsData(data, autoApply) {
+function ingestPresetsData(data) {
   const map = data?.presets || {};
   _presets = map;
   const names = Object.keys(_presets);
-  rebuildPresetsDropdown(names, autoApply);
-  console.info(`[presets] Loaded ${names.length} preset(s). Keys:`, names);
+  rebuildPresetsDropdown(names);
+  console.info(`[presets] Loaded ${names.length} preset(s).`);
 }
 
-async function loadPresetsFile(autoApply = true) {
+async function loadPresetsFile() {
   try {
-    // Avoid cache issues
-    const url = `${PRESETS_URL}?t=${Date.now()}`;
+    const url = `${PRESETS_URL}?t=${Date.now()}`; // avoid cache
     const res = await fetch(url, { cache: 'no-store' });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
-    ingestPresetsData(data, autoApply);
+    ingestPresetsData(data);
   } catch (e) {
     console.warn(`[presets] Could not fetch ${PRESETS_URL}:`, e);
-    if (location.protocol === 'file:') {
-      console.warn('[presets] You are opening via file://. Use the "Open local presets.json…" button to load presets without a server.');
-    }
-    // keep dropdown at (none)
-    rebuildPresetsDropdown([], false);
+    rebuildPresetsDropdown([]); // leave "(none)"
   }
 }
 
-function applyPreset(p, fromLoader = false) {
+function applyPreset(p) {
   if (!p) return;
   // Surface
   if (p.surface) {
@@ -911,11 +890,9 @@ function applyPreset(p, fromLoader = false) {
     params.exposure = p.view.exposure;
     renderer.toneMappingExposure = params.exposure;
   }
-
-  if (!fromLoader) console.info('[presets] Applied preset.');
   gui.updateDisplay();
 }
-loadPresetsFile(/*autoApply*/true);
+loadPresetsFile();
 
 // ---------- Reflection map loader (mp4 or image) ----------
 async function loadReflectionAuto(logOn = false) {
