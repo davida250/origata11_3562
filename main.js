@@ -1,6 +1,4 @@
-// Origata — Brownian polygon surface + echo trails + luma‑preserving RGB + Presets
-// Reflection fix: robust mp4 first-frame gating + guaranteed visible background fallback,
-//                 while keeping existing UI/logic unchanged.
+// Origata v0.48 - Entity FX Inc.
 
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
@@ -304,7 +302,6 @@ class BrownianSurface {
     }
   }
 
-  // k‑NN seeding; if makeCliques, also connect the two nearest neighbors together
   _seedInitialGraph(k = 4, makeCliques = true) {
     const N = this.N, P = this.pos, S = this.state;
     for (let i = 0; i < N; i++) {
@@ -811,7 +808,8 @@ breakCtrl = fSys.add(params, 'breakDist', 0.05, 3.0, 0.001).name('Break (≥)').
 // Animation
 const fAnim = gui.addFolder('Animation');
 fAnim.add(params, 'play').name('Play / Pause');
-fAnim.add(params, 'timeScale', 0.0, 3.0, 0.01).name('Time Scale');
+/* CHANGED: max from 3.0 -> 10.0 (per request) */
+fAnim.add(params, 'timeScale', 0.0, 10.0, 0.01).name('Time Scale');
 
 // Glow (Bloom)
 const fGlow = gui.addFolder('Glow (Bloom)');
@@ -948,6 +946,12 @@ function ingestPresetsData(data) {
   try {
     rebuildPresetsDropdown(names);
     console.info(`[presets] Loaded ${names.length} preset(s).`);
+    // NEW: load the first preset by default (if present)
+    if (names.length > 0) {
+      presetsCtl.selected = names[0];
+      if (typeof presetsDrop.updateDisplay === 'function') presetsDrop.updateDisplay();
+      applyPreset(_presets[presetsCtl.selected]);
+    }
   } catch (uiErr) {
     console.warn('[presets] UI rebuild error:', uiErr);
   }
@@ -1206,22 +1210,20 @@ async function applyReflectionFromVideo(url) {
     video.addEventListener('loadedmetadata', ok, { once: true });
     video.addEventListener('canplay', ok, { once: true });
   }).catch(() => {});
-  await video.play().catch(() => {}); // some browsers gate autoplay; we guard with first-frame wait below
+  await video.play().catch(() => {}); // guarded by first-frame wait below
   await waitForVideoDimensions(video);
 
-  // *** NEW: ensure a *real* decoded frame exists; otherwise VideoTexture can render black ***
+  // Ensure a *real* decoded frame exists
   try {
     await waitForFirstFrame(video, 4000);
   } catch {
-    // If the mp4 won't produce a frame in time, abandon video and fall back
     video.pause();
-    // Try image candidates; if none exist, we'll drop to procedural below
+    // Try image candidates; if none exist, use procedural fallback
     const pics = ['reflection.jpg','reflection.jpeg','reflection.png','reflection.webp'];
     for (const name of pics) {
       // eslint-disable-next-line no-await-in-loop
       if (await exists(name)) { await applyReflectionFromImage(name); return false; }
     }
-    // Procedural fallback so background + reflections are visibly non‑black
     envBackgroundTex = makeProceduralEquirect();
     await applyEnvFromTexture(envBackgroundTex);
     bindEnvironmentToMaterials();
@@ -1229,11 +1231,11 @@ async function applyReflectionFromVideo(url) {
     return false;
   }
 
-  // Build the VideoTexture (tuned for env/P MREM)
+  // Build the VideoTexture
   const vtex = new THREE.VideoTexture(video);
   vtex.colorSpace = THREE.SRGBColorSpace;
   vtex.needsUpdate = true;
-  vtex.mapping = THREE.EquirectangularReflectionMapping; // sky + PMREM input
+  vtex.mapping = THREE.EquirectangularReflectionMapping;
   vtex.minFilter = THREE.LinearFilter;
   vtex.magFilter = THREE.LinearFilter;
   vtex.generateMipmaps = false;
@@ -1304,8 +1306,7 @@ async function loadReflectionAuto(logOn = false) {
     if (await exists('reflection.mp4')) {
       const ok = await applyReflectionFromVideo('reflection.mp4');
       if (ok) { if (logOn) console.info('[reflection] Loaded reflection.mp4'); return; }
-      // if not ok, the function already fell back
-      return;
+      return; // if not ok, the function already fell back
     }
     const candidates = ['reflection.jpg', 'reflection.jpeg', 'reflection.png', 'reflection.webp'];
     for (const name of candidates) {
