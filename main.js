@@ -1,5 +1,5 @@
 // Origata — Brownian polygon surface + echo trails + luma‑preserving RGB + Presets
-// Reflection: full PBR controls + PMREM image/video envs with robust guards
+// Reflection: explicit envMap binding + PMREM/video/image envs, with background toggle & quick presets
 // Black‑screen hardening: seeded triangles + always-valid normals + never 0-face draw.  :contentReference[oaicite:1]{index=1}
 
 import * as THREE from 'three';
@@ -44,10 +44,14 @@ const pmrem = new THREE.PMREMGenerator(renderer);
 const defaultEnvRT = pmrem.fromScene(new RoomEnvironment(), 0.04);
 scene.environment = defaultEnvRT.texture;
 
+// Active env trackers
 let activeEnvRT = defaultEnvRT;
 let reflectionVideo = null;  // HTMLVideoElement when mp4 is used
 let reflectionTex   = null;  // THREE.VideoTexture or THREE.Texture
 let lastVideoPmrem  = 0;
+
+// Will hold our surface instance material to rebind envMap
+const reflectiveMaterials = [];
 
 // ---------- overlay shader (unchanged look) ----------
 function injectOverlay(material) {
@@ -179,7 +183,7 @@ function injectOverlay(material) {
   material.needsUpdate = true;
 }
 
-// ---------------- Brownian polygon surface (faces only; no lines/points) ----------------
+// ---------------- Brownian polygon surface (faces only) ----------------
 class BrownianSurface {
   constructor(opts) {
     this.params = { ...opts };
@@ -192,14 +196,13 @@ class BrownianSurface {
     this.vel = null;   // Float32Array (N*3)
     this.anc = null;   // Float32Array (N*3)
     this.state = null; // Uint8Array (N*N) symmetric — adjacency
-
     this.tris = [];    // Array<[i,j,k]>
 
     this.material = new THREE.MeshPhysicalMaterial({
       color: 0x151515,
       roughness: 0.26,
       metalness: 0.0,
-      envMapIntensity: 1.2,
+      envMapIntensity: 1.6,
       ior: 1.3,
       specularIntensity: 1.0,
       specularColor: new THREE.Color(0xffffff),
@@ -209,6 +212,7 @@ class BrownianSurface {
       side: THREE.DoubleSide
     });
     injectOverlay(this.material);
+    reflectiveMaterials.push(this.material); // track for envMap rebinding
 
     this.geometry = new THREE.BufferGeometry();
     this.geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(0), 3));
@@ -297,7 +301,6 @@ class BrownianSurface {
     }
   }
 
-  // k‑NN seeding; if makeCliques, also connect the two nearest neighbors together
   _seedInitialGraph(k = 4, makeCliques = true) {
     const N = this.N, P = this.pos, S = this.state;
     for (let i = 0; i < N; i++) {
@@ -343,7 +346,6 @@ class BrownianSurface {
   _rebuildGeometry(tris) {
     this.tris = tris;
 
-    // Shared-vertex layout: N vertices, indexed triangles
     const positions = new Float32Array(this.N * 3);
     const normals   = new Float32Array(this.N * 3);
     const indices   = new Uint32Array(tris.length * 3);
@@ -367,7 +369,7 @@ class BrownianSurface {
     this.geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
     this.geometry.setAttribute('normal',   new THREE.BufferAttribute(normals,   3));
     this.geometry.setIndex(new THREE.BufferAttribute(indices, 1));
-    // Critical: compute normals immediately so overlay + PBR aren't black
+    // compute normals immediately so overlay + PBR aren't black
     if (indices.length > 0) this.geometry.computeVertexNormals();
     this.geometry.computeBoundingSphere();
 
@@ -383,7 +385,6 @@ class BrownianSurface {
     }
     posAttr.needsUpdate = true;
 
-    // Always recompute normals so vWorldNormal (overlay) is valid even with flatShading
     const idx = this.geometry.getIndex();
     if (idx && idx.count > 0) {
       this.geometry.computeVertexNormals();
@@ -393,7 +394,6 @@ class BrownianSurface {
   }
 
   update(dt, now) {
-    // OU-like motion around anchors
     const N = this.N;
     const { amp, freq } = this.params;
     const beta = THREE.MathUtils.clamp(1.2 * freq + 0.2, 0, 12);
@@ -425,7 +425,7 @@ class BrownianSurface {
       this.pos[o+0] = nxp; this.pos[o+1] = nyp; this.pos[o+2] = nzp;
     }
 
-    // Proximity edges with hysteresis (preserve S)
+    // Proximity edges with hysteresis
     const S = this.state;
     const onR  = this.params.connectDist;
     const offR = Math.max(this.params.breakDist, onR + 1e-4);
@@ -446,7 +446,6 @@ class BrownianSurface {
     // Triangles = 3‑cliques
     let tris = this._computeTriangles();
 
-    // Never render 0 faces: keep previous triangles if empty this step
     if (tris.length === 0) {
       this._updatePositionsAndNormals();
     } else {
@@ -666,19 +665,47 @@ const params = {
   rgbPulseAmp:   0.0,
   rgbPulseHz:    0.5,
 
-  // Reflection material (PBR)
+  // Reflection / PBR
   reflWorkflow: 'dielectric',   // 'dielectric' | 'metal'
   reflFlatShading: true,
-  reflEnvIntensity: 1.2,
+  reflEnvIntensity: 1.6,
   reflRoughness: 0.26,
-  reflMetalness: 1.0,           // used in 'metal' workflow
-  reflIOR: 1.3,                  // used in 'dielectric' workflow
-  reflSpecularIntensity: 1.0,    // used in 'dielectric' workflow
+  reflMetalness: 1.0,           // used in 'metal'
+  reflIOR: 1.3,                 // used in 'dielectric'
+  reflSpecularIntensity: 1.0,   // used in 'dielectric'
   reflSpecularColor: '#ffffff',
   reflMetalColor: '#ffffff',
   reflClearcoat: 0.0,
   reflClearcoatRoughness: 0.2,
-  reflVideoUpdateHz: 0.0,        // PMREM refresh for video envs
+  reflVideoUpdateHz: 0.0,       // PMREM refresh for video envs
+  reflShowBackground: false,    // show env as background (debug/visual)
+
+  // Quick presets
+  chrome: () => {
+    params.reflWorkflow = 'metal';
+    params.reflFlatShading = true;
+    params.reflEnvIntensity = 2.2;
+    params.reflRoughness = 0.04;
+    params.reflMetalness = 1.0;
+    params.reflMetalColor = '#ffffff';
+    // Mute overlay a bit so reflections read clearly
+    const u = surface.mesh.material.userData._overlayUniforms; if (u) u.uBandStrength.value = 0.18;
+    syncMaterialFromParams();
+    updateReflVisibility();
+    refreshAllControllers(gui);
+  },
+  glass: () => {
+    params.reflWorkflow = 'dielectric';
+    params.reflFlatShading = false;
+    params.reflEnvIntensity = 1.8;
+    params.reflRoughness = 0.02;
+    params.reflIOR = 1.5;
+    params.reflSpecularIntensity = 1.0;
+    const u = surface.mesh.material.userData._overlayUniforms; if (u) u.uBandStrength.value = 0.10;
+    syncMaterialFromParams();
+    updateReflVisibility();
+    refreshAllControllers(gui);
+  },
 
   // View
   exposure: renderer.toneMappingExposure,
@@ -699,7 +726,18 @@ const surface = new BrownianSurface({
   breakDist: params.breakDist
 });
 
-// Sync MeshPhysicalMaterial from params
+// --- Reflection material sync + env binding ---
+function bindEnvironmentToMaterials() {
+  const env = scene.environment || null;
+  reflectiveMaterials.forEach((m) => {
+    // Explicitly bind envMap so changes are *obviously* reflected on the surface
+    m.envMap = env;
+    m.needsUpdate = true;
+  });
+  // Optional: show env as background for visual confirmation
+  scene.background = params.reflShowBackground ? env : new THREE.Color(0x000000);
+}
+
 function syncMaterialFromParams() {
   const mat = surface.material;
   // Common
@@ -712,7 +750,7 @@ function syncMaterialFromParams() {
   if (params.reflWorkflow === 'metal') {
     mat.metalness = THREE.MathUtils.clamp(params.reflMetalness, 0, 1);
     mat.color.set(params.reflMetalColor);
-    mat.ior               = 1.5; // little effect on true metals
+    mat.ior               = 1.5; // small effect on true metals
     mat.specularIntensity = 1.0;
   } else {
     mat.metalness = 0.0;
@@ -723,6 +761,9 @@ function syncMaterialFromParams() {
   }
   mat.needsUpdate = true;
   surface.setFlatShading(params.reflFlatShading);
+
+  // keep envMap bound
+  bindEnvironmentToMaterials();
 }
 
 // --- Presets (JSON) ---
@@ -749,7 +790,7 @@ let breakCtrl;
 fSys.add(params, 'count', 4, 200, 1).name('Vertices').onFinishChange(v => surface.setCount(v));
 fSys.add(params, 'amp', 0.0, 2.0, 0.001).name('Amplitude').onChange(v => surface.params.amp = v);
 fSys.add(params, 'freq', 0.0, 3.0, 0.001).name('Frequency').onChange(v => surface.params.freq = v);
-const connectCtrl = fSys.add(params, 'connectDist', 0.05, 3.0, 0.001).name('Connect (≤)').onChange(v => {
+fSys.add(params, 'connectDist', 0.05, 3.0, 0.001).name('Connect (≤)').onChange(v => {
   surface.params.connectDist = v;
   if (params.breakDist < v) {
     params.breakDist = v;
@@ -802,10 +843,10 @@ fRGB.add(params, 'rgbPulseHz', 0.0, 5.0, 0.001).name('Pulse (Hz)');
 // === Reflection (PBR) ===
 const fRefl = gui.addFolder('Reflection');
 const reflCtrls = { common: [], dielectric: [], metal: [] };
-const cWorkflow = fRefl.add(params, 'reflWorkflow', {
+reflCtrls.common.push(fRefl.add(params, 'reflWorkflow', {
   'Dielectric (non‑metal)': 'dielectric',
   'Metal (PBR)': 'metal'
-}).name('Workflow').onChange(() => { syncMaterialFromParams(); updateReflVisibility(); });
+}).name('Workflow').onChange(() => { syncMaterialFromParams(); updateReflVisibility(); }));
 
 reflCtrls.common.push(fRefl.add(params, 'reflFlatShading').name('Origami (Flat)').onChange(syncMaterialFromParams));
 reflCtrls.common.push(fRefl.add(params, 'reflEnvIntensity', 0.0, 3.0, 0.01).name('Env Intensity').onChange(syncMaterialFromParams));
@@ -813,6 +854,7 @@ reflCtrls.common.push(fRefl.add(params, 'reflRoughness', 0.0, 1.0, 0.001).name('
 reflCtrls.common.push(fRefl.add(params, 'reflClearcoat', 0.0, 1.0, 0.001).name('Clearcoat').onChange(syncMaterialFromParams));
 reflCtrls.common.push(fRefl.add(params, 'reflClearcoatRoughness', 0.0, 1.0, 0.001).name('Coat Roughness').onChange(syncMaterialFromParams));
 reflCtrls.common.push(fRefl.add(params, 'reflVideoUpdateHz', 0.0, 12.0, 0.1).name('Video PMREM Hz'));
+reflCtrls.common.push(fRefl.add(params, 'reflShowBackground').name('Show Env Background').onChange(bindEnvironmentToMaterials));
 
 reflCtrls.dielectric.push(fRefl.add(params, 'reflIOR', 1.0, 2.333, 0.001).name('IOR').onChange(syncMaterialFromParams));
 reflCtrls.dielectric.push(fRefl.add(params, 'reflSpecularIntensity', 0.0, 1.0, 0.001).name('Specular Intensity').onChange(syncMaterialFromParams));
@@ -821,6 +863,8 @@ reflCtrls.dielectric.push(fRefl.addColor(params, 'reflSpecularColor').name('Spec
 reflCtrls.metal.push(fRefl.add(params, 'reflMetalness', 0.0, 1.0, 0.001).name('Metalness').onChange(syncMaterialFromParams));
 reflCtrls.metal.push(fRefl.addColor(params, 'reflMetalColor').name('Metal Color').onChange(syncMaterialFromParams));
 fRefl.add({ reload: () => loadReflectionAuto(true) }, 'reload').name('Reload map (mp4/img)');
+fRefl.add(params, 'chrome').name('Quick: Chrome');
+fRefl.add(params, 'glass').name('Quick: Glass');
 
 function setCtrlVisible(ctrl, visible) {
   const el = ctrl?.domElement;
@@ -1009,6 +1053,7 @@ function applyPreset(p) {
     if (isFinite(p.reflection.clearcoat))          params.reflClearcoat          = p.reflection.clearcoat;
     if (isFinite(p.reflection.clearcoatRoughness)) params.reflClearcoatRoughness = p.reflection.clearcoatRoughness;
     if (isFinite(p.reflection.videoPmremHz))       params.reflVideoUpdateHz      = p.reflection.videoPmremHz;
+    if (typeof p.reflection.showBackground === 'boolean') params.reflShowBackground = p.reflection.showBackground;
     syncMaterialFromParams();
     updateReflVisibility();
   }
@@ -1017,7 +1062,6 @@ function applyPreset(p) {
     params.exposure = p.view.exposure;
     renderer.toneMappingExposure = params.exposure;
   }
-  // GUI repaint
   refreshAllControllers(gui);
 }
 loadPresetsFile();
@@ -1034,11 +1078,16 @@ function disposeActiveEnvRT(keepDefault = true) {
     activeEnvRT.dispose();
   }
 }
+function onEnvironmentChanged() {
+  bindEnvironmentToMaterials(); // rebinding & background
+  syncMaterialFromParams();     // ensure intensities apply
+}
 function setSceneEnvFromPMREM(rt) {
   if (!rt || !rt.texture) return false;
   scene.environment = rt.texture;
   disposeActiveEnvRT();
   activeEnvRT = rt;
+  onEnvironmentChanged();
   return true;
 }
 function setSceneEnvRaw(tex) {
@@ -1046,6 +1095,7 @@ function setSceneEnvRaw(tex) {
   scene.environment = tex;
   disposeActiveEnvRT(); // drop any previous PMREM to avoid leaks
   activeEnvRT = defaultEnvRT; // keep default handle
+  onEnvironmentChanged();
   return true;
 }
 async function waitForVideoDimensions(video) {
@@ -1143,11 +1193,16 @@ async function loadReflectionAuto(logOn = false) {
       }
     }
     if (logOn) console.info('[reflection] No reflection.* found, using RoomEnvironment.');
+    // still bind the default env into the material so controls work
+    bindEnvironmentToMaterials();
   } catch (e) {
     if (logOn) console.warn('[reflection] Load error:', e);
   }
 }
 loadReflectionAuto(true);
+
+// Ensure default env is also bound on startup
+bindEnvironmentToMaterials();
 
 // ---------- loop ----------
 let tPrev = performance.now();
