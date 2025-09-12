@@ -1,5 +1,5 @@
 // Origata — Brownian polygon surface + echo trails + luma‑preserving RGB + Presets
-// Reflection: explicit envMap binding + PMREM/video/image envs, with background toggle & quick presets
+// Reflection: explicit envMap binding + PMREM/video/image envs, with raw-equirect sky toggle
 // Black‑screen hardening: seeded triangles + always-valid normals + never 0-face draw.  :contentReference[oaicite:1]{index=1}
 
 import * as THREE from 'three';
@@ -50,7 +50,10 @@ let reflectionVideo = null;  // HTMLVideoElement when mp4 is used
 let reflectionTex   = null;  // THREE.VideoTexture or THREE.Texture
 let lastVideoPmrem  = 0;
 
-// Will hold our surface instance material to rebind envMap
+// Raw equirect texture for sky toggle (PMREM is lighting-only, not displayable as sky)
+let envBackgroundTex = null;
+
+// Track materials that need explicit envMap rebinding
 const reflectiveMaterials = [];
 
 // ---------- overlay shader (unchanged look) ----------
@@ -212,7 +215,7 @@ class BrownianSurface {
       side: THREE.DoubleSide
     });
     injectOverlay(this.material);
-    reflectiveMaterials.push(this.material); // track for envMap rebinding
+    reflectiveMaterials.push(this.material);
 
     this.geometry = new THREE.BufferGeometry();
     this.geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(0), 3));
@@ -301,6 +304,7 @@ class BrownianSurface {
     }
   }
 
+  // k‑NN seeding; if makeCliques, also connect the two nearest neighbors together
   _seedInitialGraph(k = 4, makeCliques = true) {
     const N = this.N, P = this.pos, S = this.state;
     for (let i = 0; i < N; i++) {
@@ -678,9 +682,9 @@ const params = {
   reflClearcoat: 0.0,
   reflClearcoatRoughness: 0.2,
   reflVideoUpdateHz: 0.0,       // PMREM refresh for video envs
-  reflShowBackground: false,    // show env as background (debug/visual)
+  reflShowBackground: false,    // show raw equirect env as background (if present)
 
-  // Quick presets
+  // Quick demo presets for reflection
   chrome: () => {
     params.reflWorkflow = 'metal';
     params.reflFlatShading = true;
@@ -688,7 +692,6 @@ const params = {
     params.reflRoughness = 0.04;
     params.reflMetalness = 1.0;
     params.reflMetalColor = '#ffffff';
-    // Mute overlay a bit so reflections read clearly
     const u = surface.mesh.material.userData._overlayUniforms; if (u) u.uBandStrength.value = 0.18;
     syncMaterialFromParams();
     updateReflVisibility();
@@ -730,12 +733,15 @@ const surface = new BrownianSurface({
 function bindEnvironmentToMaterials() {
   const env = scene.environment || null;
   reflectiveMaterials.forEach((m) => {
-    // Explicitly bind envMap so changes are *obviously* reflected on the surface
-    m.envMap = env;
+    m.envMap = env;           // explicit binding so IBL is obvious
     m.needsUpdate = true;
   });
-  // Optional: show env as background for visual confirmation
-  scene.background = params.reflShowBackground ? env : new THREE.Color(0x000000);
+  // Show the *raw* equirect texture as a sky when requested; PMREM is lighting-only
+  if (params.reflShowBackground) {
+    scene.background = envBackgroundTex || env || new THREE.Color(0x000000);
+  } else {
+    scene.background = new THREE.Color(0x000000);
+  }
 }
 
 function syncMaterialFromParams() {
@@ -750,7 +756,7 @@ function syncMaterialFromParams() {
   if (params.reflWorkflow === 'metal') {
     mat.metalness = THREE.MathUtils.clamp(params.reflMetalness, 0, 1);
     mat.color.set(params.reflMetalColor);
-    mat.ior               = 1.5; // small effect on true metals
+    mat.ior               = 1.5; // little effect on true metals
     mat.specularIntensity = 1.0;
   } else {
     mat.metalness = 0.0;
@@ -762,7 +768,6 @@ function syncMaterialFromParams() {
   mat.needsUpdate = true;
   surface.setFlatShading(params.reflFlatShading);
 
-  // keep envMap bound
   bindEnvironmentToMaterials();
 }
 
@@ -1147,6 +1152,8 @@ async function applyReflectionFromImage(url) {
     loader.load(url, resolve, undefined, reject);
   });
   tex.colorSpace = THREE.SRGBColorSpace;
+  tex.mapping = THREE.EquirectangularReflectionMapping; // sky + PMREM input
+  envBackgroundTex = tex; // keep raw equirect for "Show Env Background"
   if (reflectionTex && reflectionTex.isTexture) reflectionTex.dispose();
   reflectionTex = tex;
   await applyEnvFromTexture(reflectionTex);
@@ -1170,6 +1177,8 @@ async function applyReflectionFromVideo(url) {
   const vtex = new THREE.VideoTexture(video);
   vtex.colorSpace = THREE.SRGBColorSpace;
   vtex.needsUpdate = true;
+  vtex.mapping = THREE.EquirectangularReflectionMapping; // sky + PMREM input
+  envBackgroundTex = vtex; // raw video equirect for background
 
   if (reflectionTex && reflectionTex.isTexture) reflectionTex.dispose();
   reflectionTex = vtex;
@@ -1179,6 +1188,7 @@ async function applyReflectionFromVideo(url) {
 }
 async function loadReflectionAuto(logOn = false) {
   try {
+    envBackgroundTex = null; // reset; will be set if we find an equirect
     if (await exists('reflection.mp4')) {
       await applyReflectionFromVideo('reflection.mp4');
       if (logOn) console.info('[reflection] Loaded reflection.mp4');
@@ -1193,15 +1203,14 @@ async function loadReflectionAuto(logOn = false) {
       }
     }
     if (logOn) console.info('[reflection] No reflection.* found, using RoomEnvironment.');
-    // still bind the default env into the material so controls work
-    bindEnvironmentToMaterials();
+    bindEnvironmentToMaterials(); // still bind default env
   } catch (e) {
     if (logOn) console.warn('[reflection] Load error:', e);
   }
 }
 loadReflectionAuto(true);
 
-// Ensure default env is also bound on startup
+// Ensure default env is bound on startup
 bindEnvironmentToMaterials();
 
 // ---------- loop ----------
