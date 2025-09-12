@@ -1,6 +1,12 @@
-// Origata — Brownian polygon surface + echo trails + luma‑preserving RGB + Presets + Reflection Map
-// -----------------------------------------------------------------------------------------------
-// Base: your last working build (post chain fix, bright base + fading echoes, surface-anchored points). :contentReference[oaicite:1]{index=1}
+// Origata — Brownian polygon surface + echo trails + luma‑preserving RGB + Presets + Reflection Map + Intensity Control
+// --------------------------------------------------------------------------------------------------------------------
+// Base taken from your last working build (post chain fix, bright base + fading echoes, surface-anchored points).  :contentReference[oaicite:1]{index=1}
+//
+// What’s new:
+//  • Presets robustness: auto‑load presets.json when served over http(s); if opening via file://, use the built‑in file picker.
+//  • Reflection control: slider to adjust reflection intensity (envMapIntensity) live, for both image and video envs.
+//  • Minor: optional auto‑apply first preset on load; dropdown rebuilt reliably.
+
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
@@ -42,9 +48,9 @@ controls.maxDistance = 9.0;
 const pmrem = new THREE.PMREMGenerator(renderer);
 const defaultEnvRT = pmrem.fromScene(new RoomEnvironment(), 0.04);
 scene.environment = defaultEnvRT.texture;
-let activeEnvRT = defaultEnvRT;     // keep track so we can dispose previous custom RTs
-let reflectionVideo = null;         // HTMLVideoElement, if using video map
-let reflectionTex = null;           // THREE.VideoTexture or THREE.Texture
+let activeEnvRT = defaultEnvRT;     // dispose if we replace
+let reflectionVideo = null;         // HTMLVideoElement for mp4 env
+let reflectionTex = null;           // Texture/VideoTexture for cleanup
 
 // ---------- overlay shader (unchanged look) ----------
 function injectOverlay(material) {
@@ -197,7 +203,7 @@ class BrownianSurface {
       color: 0x151515,
       roughness: 0.26,
       metalness: 0.0,
-      envMapIntensity: 1.2,
+      envMapIntensity: 1.2, // will be overridden by UI slider after construction
       iridescence: 1.0,
       iridescenceIOR: 1.3,
       iridescenceThicknessRange: [120, 620],
@@ -622,6 +628,9 @@ const params = {
   rgbPulseAmp:   0.0,
   rgbPulseHz:    0.5,
 
+  // Reflection
+  reflectionIntensity: 1.2,   // controls material.envMapIntensity
+
   // View
   exposure: renderer.toneMappingExposure,
   resetCamera: () => {
@@ -641,12 +650,20 @@ const surface = new BrownianSurface({
   breakDist: params.breakDist
 });
 
-// --- GUI folders ---
+// --- GUI folders (incl. Presets + Reflection) ---
 const fPresets = gui.addFolder('Presets');
-const presetsCtl = { selected: '(none)', load: () => { if (presetsCtl.selected in _presets) applyPreset(_presets[presetsCtl.selected]); }, reload: () => loadPresetsFile() };
+const presetsCtl = {
+  selected: '(none)',
+  load: () => { if (presetsCtl.selected in _presets) applyPreset(_presets[presetsCtl.selected], true); },
+  reload: () => loadPresetsFile(true),
+  openLocal: () => _hiddenPicker.click(),
+  autoApplyFirst: true
+};
 let presetsDrop = fPresets.add(presetsCtl, 'selected', ['(none)']).name('Select');
-fPresets.add(presetsCtl, 'load').name('Load');
+fPresets.add(presetsCtl, 'load').name('Load Selected');
 fPresets.add(presetsCtl, 'reload').name('Reload presets.json');
+fPresets.add(presetsCtl, 'openLocal').name('Open local presets.json…');
+fPresets.add(presetsCtl, 'autoApplyFirst').name('Auto‑apply first');
 
 const fSrc = gui.addFolder('Surface Source');
 fSrc.add(params, 'primitive', { Sphere: 'sphere', Cube: 'cube', Torus: 'torus' })
@@ -700,6 +717,11 @@ fRGB.add(params, 'rgbSpinHz', 0.0, 3.0, 0.001).name('Spin (Hz)');
 fRGB.add(params, 'rgbPulseAmp', 0.0, 0.10, 0.0001).name('Pulse Amp').onChange(updateRGBEnabled);
 fRGB.add(params, 'rgbPulseHz', 0.0, 5.0, 0.001).name('Pulse (Hz)');
 
+const fRefl = gui.addFolder('Reflection');
+fRefl.add(params, 'reflectionIntensity', 0.0, 3.0, 0.01).name('Intensity')
+     .onChange(updateReflectionIntensity);
+fRefl.add({ reload: () => loadReflectionAuto(true) }, 'reload').name('Reload map (mp4/img)');
+
 const fView = gui.addFolder('View');
 fView.add(params, 'exposure', 0.6, 1.8, 0.01).name('Exposure').onChange(v => renderer.toneMappingExposure = v);
 fView.add(params, 'resetCamera').name('Reset Camera');
@@ -739,36 +761,75 @@ function updateRGBEnabled() {
   const active = (params.rgbAmount + params.rgbPulseAmp) > 0 || params.rgbAnimate;
   rgbShiftPass.enabled = active;
 }
+function updateReflectionIntensity() {
+  const mat = surface?.mesh?.material;
+  if (mat && 'envMapIntensity' in mat) {
+    mat.envMapIntensity = params.reflectionIntensity;
+    mat.needsUpdate = true;
+  }
+}
 updateTrailEnabled();
 updateRGBEnabled();
+updateReflectionIntensity();
 
 // ---------- Presets (JSON) ----------
 const PRESETS_URL = 'presets.json';
 let _presets = {};
-async function loadPresetsFile() {
-  try {
-    const res = await fetch(PRESETS_URL, { cache: 'no-store' });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = await res.json();
-    const map = data?.presets || {};
-    _presets = map;
-    // refresh dropdown options
-    const names = Object.keys(_presets);
-    const opts  = names.length ? names : ['(none)'];
-    // rebuild the controller to update options
-    fPresets.remove(presetsDrop);
-    presetsCtl.selected = opts[0];
-    presetsDrop = fPresets.add(presetsCtl, 'selected', opts).name('Select');
-    console.info(`[presets] Loaded ${names.length} preset(s) from ${PRESETS_URL}`);
-  } catch (e) {
-    console.warn(`[presets] Could not load ${PRESETS_URL}:`, e);
-    // keep (none)
-    fPresets.remove(presetsDrop);
-    presetsCtl.selected = '(none)';
-    presetsDrop = fPresets.add(presetsCtl, 'selected', ['(none)']).name('Select');
+const _hiddenPicker = document.createElement('input');
+_hiddenPicker.type = 'file';
+_hiddenPicker.accept = '.json,application/json';
+_hiddenPicker.style.display = 'none';
+document.body.appendChild(_hiddenPicker);
+_hiddenPicker.addEventListener('change', (e) => {
+  const f = _hiddenPicker.files && _hiddenPicker.files[0];
+  if (!f) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const data = JSON.parse(reader.result);
+      ingestPresetsData(data, /*autoApply=*/true);
+    } catch (err) { console.warn('[presets] Local parse error:', err); }
+  };
+  reader.readAsText(f);
+});
+
+function rebuildPresetsDropdown(names, autoApply) {
+  const opts = (names.length ? names : ['(none)']);
+  if (presetsDrop) fPresets.remove(presetsDrop);
+  presetsCtl.selected = opts[0];
+  presetsDrop = fPresets.add(presetsCtl, 'selected', opts).name('Select');
+  if (autoApply && names.length && presetsCtl.autoApplyFirst) {
+    applyPreset(_presets[opts[0]], true);
   }
 }
-function applyPreset(p) {
+
+function ingestPresetsData(data, autoApply) {
+  const map = data?.presets || {};
+  _presets = map;
+  const names = Object.keys(_presets);
+  rebuildPresetsDropdown(names, autoApply);
+  console.info(`[presets] Loaded ${names.length} preset(s). Keys:`, names);
+}
+
+async function loadPresetsFile(autoApply = true) {
+  try {
+    // Avoid cache issues
+    const url = `${PRESETS_URL}?t=${Date.now()}`;
+    const res = await fetch(url, { cache: 'no-store' });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    ingestPresetsData(data, autoApply);
+  } catch (e) {
+    console.warn(`[presets] Could not fetch ${PRESETS_URL}:`, e);
+    if (location.protocol === 'file:') {
+      console.warn('[presets] You are opening via file://. Use the "Open local presets.json…" button to load presets without a server.');
+    }
+    // keep dropdown at (none)
+    rebuildPresetsDropdown([], false);
+  }
+}
+
+function applyPreset(p, fromLoader = false) {
   if (!p) return;
   // Surface
   if (p.surface) {
@@ -840,31 +901,37 @@ function applyPreset(p) {
       u.uCellFreq.value     = surfaceAdv.cellFreq;
     }
   }
+  // Reflection
+  if (p.reflection && isFinite(p.reflection.intensity)) {
+    params.reflectionIntensity = p.reflection.intensity;
+    updateReflectionIntensity();
+  }
   // View
   if (p.view && isFinite(p.view.exposure)) {
     params.exposure = p.view.exposure;
     renderer.toneMappingExposure = params.exposure;
   }
+
+  if (!fromLoader) console.info('[presets] Applied preset.');
   gui.updateDisplay();
 }
-loadPresetsFile(); // attempt load at startup
+loadPresetsFile(/*autoApply*/true);
 
 // ---------- Reflection map loader (mp4 or image) ----------
-async function loadReflectionAuto() {
-  // try video first, then fallback to common image names
+async function loadReflectionAuto(logOn = false) {
   try {
     await applyReflectionFromVideo('reflection.mp4');
-    console.info('[reflection] Loaded reflection.mp4');
+    if (logOn) console.info('[reflection] Loaded reflection.mp4');
   } catch {
     const candidates = ['reflection.jpg', 'reflection.jpeg', 'reflection.png', 'reflection.webp'];
     for (const name of candidates) {
       try {
         await applyReflectionFromImage(name);
-        console.info(`[reflection] Loaded ${name}`);
+        if (logOn) console.info(`[reflection] Loaded ${name}`);
         return;
       } catch {}
     }
-    console.info('[reflection] No reflection.* found, using RoomEnvironment.');
+    if (logOn) console.info('[reflection] No reflection.* found, using RoomEnvironment.');
   }
 }
 function disposeActiveEnvRT(keepDefault = true) {
@@ -875,13 +942,12 @@ function disposeActiveEnvRT(keepDefault = true) {
   }
 }
 async function applyReflectionFromImage(url) {
-  // LDR equirectangular image → PMREM
   const tex = await new Promise((resolve, reject) => {
     const loader = new THREE.TextureLoader();
     loader.load(url, resolve, undefined, reject);
   });
   tex.colorSpace = THREE.SRGBColorSpace;
-  tex.mapping = THREE.EquirectangularReflectionMapping; // tell three.js it's equirectangular
+  tex.mapping = THREE.EquirectangularReflectionMapping;
   disposeActiveEnvRT();
   const rt = pmrem.fromEquirectangular(tex);
   scene.environment = rt.texture;
@@ -890,7 +956,6 @@ async function applyReflectionFromImage(url) {
   reflectionTex = tex;
 }
 async function applyReflectionFromVideo(url) {
-  // Equirectangular video as environment (mapped directly)
   const video = document.createElement('video');
   video.src = url;
   video.crossOrigin = 'anonymous';
@@ -903,20 +968,18 @@ async function applyReflectionFromVideo(url) {
     video.addEventListener('error', onErr, { once: true });
     video.addEventListener('canplay', () => resolve(), { once: true });
   });
-  await video.play().catch(() => {}); // allow autoplay (muted)
+  await video.play().catch(() => {});
   const vtex = new THREE.VideoTexture(video);
   vtex.colorSpace = THREE.SRGBColorSpace;
   vtex.mapping = THREE.EquirectangularReflectionMapping;
-  // For dynamic video we map directly; PMREM per-frame is heavy. (See notes below.)
   scene.environment = vtex;
-  // clean up previous
-  disposeActiveEnvRT(false); // we are not using a PMREM RT here
+  disposeActiveEnvRT(false);
   activeEnvRT = null;
   if (reflectionTex && reflectionTex.isTexture) reflectionTex.dispose();
   reflectionTex = vtex;
   reflectionVideo = video;
 }
-loadReflectionAuto();
+loadReflectionAuto(false);
 
 // ---------- loop ----------
 let tPrev = performance.now();
