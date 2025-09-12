@@ -1,11 +1,8 @@
 // Origata — Brownian polygon surface + echo trails + luma‑preserving RGB + Presets
-// Reflection overhaul: full PBR controls + PMREM video/image loader + flat/smooth reflection shading
-// Fixes included:
-//  • Removed invalid gui.updateDisplay() calls (use controller.updateDisplay() per controller).
-//  • Presets dropdown rebuilt via controller.options(...), safe and idempotent.
-//  • Seeded proximity graph (k‑nearest neighbors) so triangles exist on frame 0 (no black screen).
-//  • Hysteresis edges preserved across frames (connect ≤, break ≥), so faces evolve organically.
-//  • Reflection map: MP4 or image with PMREM; optional periodic PMREM refresh for video env‑maps.
+// Reflection: full PBR controls + PMREM image/video envs + robust UI switching
+// Black‑screen hardening: clique‑seeded graph at t=0 → guaranteed triangles.
+//
+// Based on your last uploaded files; UI/FX preserved.  (index.html / main.js)  
 
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
@@ -48,12 +45,12 @@ controls.maxDistance = 9.0;
 const pmrem = new THREE.PMREMGenerator(renderer);
 const defaultEnvRT = pmrem.fromScene(new RoomEnvironment(), 0.04);
 scene.environment = defaultEnvRT.texture;
-let activeEnvRT = defaultEnvRT;     // track active PMREM to dispose when replaced
-let reflectionVideo = null;         // HTMLVideoElement if using mp4
-let reflectionTex = null;           // THREE.VideoTexture or THREE.Texture
-let lastVideoPmrem = 0;
+let activeEnvRT = defaultEnvRT;
+let reflectionVideo = null;   // HTMLVideoElement if using mp4
+let reflectionTex   = null;   // THREE.VideoTexture or THREE.Texture
+let lastVideoPmrem  = 0;
 
-// ---------- overlay shader (original look preserved) ----------
+// ---------- overlay shader (your original look preserved) ----------
 function injectOverlay(material) {
   const uniforms = {
     uTime:         { value: 0 },
@@ -183,7 +180,7 @@ function injectOverlay(material) {
   material.needsUpdate = true;
 }
 
-// ---------------- Brownian polygon surface (shared vertices; faces only) ----------------
+// ---------------- Brownian polygon surface (faces only) ----------------
 class BrownianSurface {
   constructor(opts) {
     this.params = { ...opts };
@@ -241,10 +238,10 @@ class BrownianSurface {
 
     this._initAnchorsFromSurface(this.surfaceType, this.surfaceJitter);
 
-    // Seed initial connectivity so triangles exist at frame 0
-    this._seedInitialGraph(3); // k-nearest neighbors per vertex
-    const seededTris = this._computeTriangles();
-    this._rebuildGeometry(seededTris);
+    // Seed initial connectivity with clique closure so triangles exist at frame 0
+    this._seedInitialGraph(4, true); // 4‑NN + close the two nearest into a clique
+    const tris0 = this._computeTriangles();
+    this._rebuildGeometry(tris0);
   }
 
   _initAnchorsFromSurface(type, jitter) {
@@ -301,8 +298,8 @@ class BrownianSurface {
     }
   }
 
-  // One-shot: connect k nearest neighbors per vertex (symmetric), to avoid empty graph at t=0
-  _seedInitialGraph(k = 3) {
+  // k‑NN seeding; if makeCliques, also connect the two nearest neighbors together
+  _seedInitialGraph(k = 4, makeCliques = true) {
     const N = this.N, P = this.pos, S = this.state;
     for (let i = 0; i < N; i++) {
       const ix = i*3, ax = P[ix], ay = P[ix+1], az = P[ix+2];
@@ -318,6 +315,10 @@ class BrownianSurface {
       for (let t = 0; t < m; t++) {
         const j = nn[t][0];
         S[i*N + j] = S[j*N + i] = 1;
+      }
+      if (makeCliques && m >= 2) {
+        const a = nn[0][0], b = nn[1][0];
+        S[a*N + b] = S[b*N + a] = 1;
       }
     }
   }
@@ -343,7 +344,7 @@ class BrownianSurface {
   _rebuildGeometry(tris) {
     this.tris = tris;
 
-    // Shared-vertex layout: position len = N, indices = [i,j,k] per triangle
+    // Shared-vertex layout: N vertices, indexed triangles
     const positions = new Float32Array(this.N * 3);
     const normals   = new Float32Array(this.N * 3);
     const indices   = new Uint32Array(tris.length * 3);
@@ -375,7 +376,6 @@ class BrownianSurface {
   _updatePositionsAndNormals() {
     const posAttr = this.geometry.getAttribute('position');
     if (!posAttr) return;
-
     for (let i = 0; i < this.N; i++) {
       const pi = i * 3;
       posAttr.setXYZ(i, this.pos[pi+0], this.pos[pi+1], this.pos[pi+2]);
@@ -422,7 +422,7 @@ class BrownianSurface {
       this.pos[o+0] = nxp; this.pos[o+1] = nyp; this.pos[o+2] = nzp;
     }
 
-    // Proximity edges with hysteresis — preserve previous S, then toggle edges
+    // Proximity edges with hysteresis (preserve S)
     const S = this.state;
     const onR  = this.params.connectDist;
     const offR = Math.max(this.params.breakDist, onR + 1e-4);
@@ -440,8 +440,26 @@ class BrownianSurface {
       }
     }
 
-    // Triangles = 3‑cliques of S
-    const tris = this._computeTriangles();
+    // Triangles = 3‑cliques
+    let tris = this._computeTriangles();
+
+    // If (extremely unlikely) empty, gently relax thresholds for one rebuild
+    if (tris.length === 0) {
+      const backupOn = this.params.connectDist;
+      const backupOff= this.params.breakDist;
+      this.params.connectDist = Math.max(0.2, backupOn * 1.15);
+      this.params.breakDist   = Math.max(this.params.connectDist, backupOff * 1.15);
+      // re‑enable some edges
+      for (let i = 0; i < N; i++) for (let j = i+1; j < N; j++) {
+        const ix = i*3, jx = j*3;
+        const dx = this.pos[jx]-this.pos[ix], dy = this.pos[jx+1]-this.pos[ix+1], dz = this.pos[jx+2]-this.pos[ix+2];
+        const d  = Math.sqrt(dx*dx+dy*dy+dz*dz);
+        if (d <= this.params.connectDist) S[i*N+j] = S[j*N+i] = 1;
+      }
+      tris = this._computeTriangles();
+      this.params.connectDist = backupOn;
+      this.params.breakDist   = backupOff;
+    }
 
     // Rebuild or update indices
     const idxAttr = this.geometry.getIndex();
@@ -622,7 +640,6 @@ const uiHost = document.getElementById('ui');
 const gui = new GUI({ title: 'Controls', width: 320 });
 uiHost.appendChild(gui.domElement);
 
-// Core params
 const params = {
   // Brownian surface
   primitive:     'sphere',  // 'sphere' | 'cube' | 'torus'
@@ -630,8 +647,8 @@ const params = {
   count:         36,
   amp:           0.85,
   freq:          0.9,
-  connectDist:   0.78,
-  breakDist:     0.98,
+  connectDist:   1.05,  // slightly higher default to ensure initial faces
+  breakDist:     1.30,
 
   // Animation
   play:       true,
@@ -662,18 +679,18 @@ const params = {
   rgbPulseHz:    0.5,
 
   // Reflection material (PBR)
-  reflMode: 'dielectric',        // 'dielectric' | 'metal'
-  reflFlatShading: true,         // keep origami by default
-  reflEnvIntensity: 1.2,         // envMapIntensity
-  reflRoughness: 0.26,           // “spread”
-  reflMetalness: 0.0,            // metal workflow (0..1)
-  reflIOR: 1.3,                  // dielectric index
-  reflSpecularIntensity: 1.0,    // dielectric specular intensity
-  reflSpecularColor: '#ffffff',  // dielectric specular tint
-  reflMetalColor: '#ffffff',     // metal base color (chrome≈white)
+  reflWorkflow: 'dielectric',   // 'dielectric' | 'metal'
+  reflFlatShading: true,
+  reflEnvIntensity: 1.2,
+  reflRoughness: 0.26,
+  reflMetalness: 1.0,           // used in 'metal' workflow
+  reflIOR: 1.3,                  // used in 'dielectric' workflow
+  reflSpecularIntensity: 1.0,    // used in 'dielectric' workflow
+  reflSpecularColor: '#ffffff',
+  reflMetalColor: '#ffffff',
   reflClearcoat: 0.0,
   reflClearcoatRoughness: 0.2,
-  reflVideoUpdateHz: 0.0,        // 0 = static; >0 = re-PMREM video N times/sec
+  reflVideoUpdateHz: 0.0,        // PMREM refresh for video envs
 
   // View
   exposure: renderer.toneMappingExposure,
@@ -697,28 +714,31 @@ const surface = new BrownianSurface({
 // Sync MeshPhysicalMaterial from params
 function syncMaterialFromParams() {
   const mat = surface.material;
+  // Common
   mat.envMapIntensity    = params.reflEnvIntensity;
   mat.roughness          = params.reflRoughness;
   mat.clearcoat          = params.reflClearcoat;
   mat.clearcoatRoughness = params.reflClearcoatRoughness;
   mat.flatShading        = params.reflFlatShading;
-  mat.ior                = params.reflIOR;
-  mat.specularIntensity  = params.reflSpecularIntensity;
-  mat.specularColor.set(params.reflSpecularColor);
 
-  if (params.reflMode === 'metal') {
-    mat.metalness = params.reflMetalness;
+  if (params.reflWorkflow === 'metal') {
+    mat.metalness = THREE.MathUtils.clamp(params.reflMetalness, 0, 1);
     mat.color.set(params.reflMetalColor);
+    // Typical metal workflow ignores dielectric IOR/specular knobs
+    mat.ior               = 1.5; // doesn't affect metals significantly
+    mat.specularIntensity = 1.0;
   } else {
     mat.metalness = 0.0;
     mat.color.set(0x151515);
+    mat.ior               = THREE.MathUtils.clamp(params.reflIOR, 1.0, 2.333);
+    mat.specularIntensity = THREE.MathUtils.clamp(params.reflSpecularIntensity, 0.0, 1.0);
+    mat.specularColor.set(params.reflSpecularColor);
   }
   mat.needsUpdate = true;
   surface.setFlatShading(params.reflFlatShading);
 }
-syncMaterialFromParams();
 
-// --- Presets (JSON) ---
+// --- Folders ---
 const fPresets = gui.addFolder('Presets');
 const presetsCtl = {
   selected: '(none)',
@@ -729,20 +749,18 @@ let presetsDrop = fPresets.add(presetsCtl, 'selected', ['(none)']).name('Select'
 fPresets.add(presetsCtl, 'load').name('Load Selected');
 fPresets.add(presetsCtl, 'reload').name('Reload presets.json');
 
-// Surface source
 const fSrc = gui.addFolder('Surface Source');
 fSrc.add(params, 'primitive', { Sphere: 'sphere', Cube: 'cube', Torus: 'torus' })
    .name('Primitive').onChange(v => surface.setSurfaceType(v));
 fSrc.add(params, 'surfaceJitter', 0.0, 0.6, 0.001).name('± Offset')
     .onFinishChange(v => surface.setSurfaceJitter(v));
 
-// Brownian Surface
 const fSys = gui.addFolder('Brownian Surface');
 let breakCtrl;
 fSys.add(params, 'count', 4, 200, 1).name('Vertices').onFinishChange(v => surface.setCount(v));
 fSys.add(params, 'amp', 0.0, 2.0, 0.001).name('Amplitude').onChange(v => surface.params.amp = v);
 fSys.add(params, 'freq', 0.0, 3.0, 0.001).name('Frequency').onChange(v => surface.params.freq = v);
-const connectCtrl = fSys.add(params, 'connectDist', 0.05, 2.0, 0.001).name('Connect (≤)').onChange(v => {
+const connectCtrl = fSys.add(params, 'connectDist', 0.05, 3.0, 0.001).name('Connect (≤)').onChange(v => {
   surface.params.connectDist = v;
   if (params.breakDist < v) {
     params.breakDist = v;
@@ -750,18 +768,16 @@ const connectCtrl = fSys.add(params, 'connectDist', 0.05, 2.0, 0.001).name('Conn
     if (breakCtrl && typeof breakCtrl.updateDisplay === 'function') breakCtrl.updateDisplay();
   }
 });
-breakCtrl = fSys.add(params, 'breakDist', 0.05, 2.0, 0.001).name('Break (≥)').onChange(v => {
+breakCtrl = fSys.add(params, 'breakDist', 0.05, 3.0, 0.001).name('Break (≥)').onChange(v => {
   surface.params.breakDist = Math.max(v, params.connectDist);
   params.breakDist = surface.params.breakDist;
   if (typeof breakCtrl.updateDisplay === 'function') breakCtrl.updateDisplay();
 });
 
-// Animation
 const fAnim = gui.addFolder('Animation');
 fAnim.add(params, 'play').name('Play / Pause');
 fAnim.add(params, 'timeScale', 0.0, 3.0, 0.01).name('Time Scale');
 
-// Glow (Bloom)
 const fGlow = gui.addFolder('Glow (Bloom)');
 fGlow.add(params, 'bloomStrength', 0.0, 2.5, 0.01).name('Strength').onChange(v => {
   bloomPass.strength = v;
@@ -770,7 +786,6 @@ fGlow.add(params, 'bloomStrength', 0.0, 2.5, 0.01).name('Strength').onChange(v =
 fGlow.add(params, 'bloomThreshold', 0.0, 1.0, 0.001).name('Threshold').onChange(v => bloomPass.threshold = v);
 fGlow.add(params, 'bloomRadius', 0.0, 1.0, 0.001).name('Radius').onChange(v => bloomPass.radius = v);
 
-// Trails (Echoes)
 const fTrail = gui.addFolder('Trails (Echoes)');
 fTrail.add(params, 'trailEnabled').name('Enable').onChange(updateTrailEnabled);
 fTrail.add(params, 'trailPersistence', 0.0, 99.9, 0.1).name('Persistence (%)');
@@ -782,7 +797,6 @@ fTrail.add(params, 'trailGamma', 0.5, 2.5, 0.01).name('Echo Gamma').onChange(upd
 fTrail.add(params, 'trailSaturation', 0.0, 2.0, 0.01).name('Echo Saturation').onChange(updateTrailUniforms);
 fTrail.add(params, 'trailClear').name('Clear Trails');
 
-// RGB offset (luma‑neutral)
 const fRGB = gui.addFolder('RGB Offset (Luma‑neutral)');
 fRGB.add(params, 'rgbAmount', 0.0, 0.10, 0.0001).name('Amount').onChange(updateRGBEnabled);
 fRGB.add(params, 'rgbAngle', 0.0, 360.0, 0.1).name('Angle (°)')
@@ -792,31 +806,40 @@ fRGB.add(params, 'rgbSpinHz', 0.0, 3.0, 0.001).name('Spin (Hz)');
 fRGB.add(params, 'rgbPulseAmp', 0.0, 0.10, 0.0001).name('Pulse Amp').onChange(updateRGBEnabled);
 fRGB.add(params, 'rgbPulseHz', 0.0, 5.0, 0.001).name('Pulse (Hz)');
 
-// Reflection (PBR)
-const fRefl = gui.addFolder('Reflection (PBR)');
-fRefl.add(params, 'reflMode', { Dielectric: 'dielectric', Metal: 'metal' }).name('Workflow').onChange(() => { syncMaterialFromParams(); toggleReflUI(); });
-fRefl.add(params, 'reflFlatShading').name('Origami (Flat)').onChange(syncMaterialFromParams);
-fRefl.add(params, 'reflEnvIntensity', 0.0, 3.0, 0.01).name('Env Intensity').onChange(syncMaterialFromParams);
-fRefl.add(params, 'reflRoughness', 0.0, 1.0, 0.001).name('Spread (Roughness)').onChange(syncMaterialFromParams);
-const metalCtrl = fRefl.add(params, 'reflMetalness', 0.0, 1.0, 0.001).name('Metalness').onChange(syncMaterialFromParams);
-const metalCol  = fRefl.addColor(params, 'reflMetalColor').name('Metal Color').onChange(syncMaterialFromParams);
-const iorCtrl   = fRefl.add(params, 'reflIOR', 1.0, 2.333, 0.001).name('IOR (dielectric)').onChange(syncMaterialFromParams);
-const specCtrl  = fRefl.add(params, 'reflSpecularIntensity', 0.0, 1.0, 0.001).name('Specular Intensity').onChange(syncMaterialFromParams);
-const specCol   = fRefl.addColor(params, 'reflSpecularColor').name('Specular Color').onChange(syncMaterialFromParams);
-fRefl.add(params, 'reflClearcoat', 0.0, 1.0, 0.001).name('Clearcoat').onChange(syncMaterialFromParams);
-fRefl.add(params, 'reflClearcoatRoughness', 0.0, 1.0, 0.001).name('Coat Roughness').onChange(syncMaterialFromParams);
-fRefl.add(params, 'reflVideoUpdateHz', 0.0, 12.0, 0.1).name('Video PMREM Hz');
-fRefl.add({ reload: () => loadReflectionAuto(true) }, 'reload').name('Reload map (mp4/img)');
+// === Reflection (PBR) ===
+const fRefl = gui.addFolder('Reflection');
+const reflCtrls = { common: [], dielectric: [], metal: [] };
+const cWorkflow = fRefl.add(params, 'reflWorkflow', {
+  'Dielectric (non‑metal)': 'dielectric',
+  'Metal (PBR)': 'metal'
+}).name('Workflow').onChange(() => { syncMaterialFromParams(); updateReflVisibility(); });
 
-function toggleReflUI() {
-  const isMetal = (params.reflMode === 'metal');
-  metalCtrl.domElement.parentElement.style.display = isMetal ? '' : 'none';
-  metalCol.domElement.parentElement.style.display  = isMetal ? '' : 'none';
-  iorCtrl.domElement.parentElement.style.display   = !isMetal ? '' : 'none';
-  specCtrl.domElement.parentElement.style.display  = !isMetal ? '' : 'none';
-  specCol.domElement.parentElement.style.display   = !isMetal ? '' : 'none';
+reflCtrls.common.push(fRefl.add(params, 'reflFlatShading').name('Origami (Flat)').onChange(syncMaterialFromParams));
+reflCtrls.common.push(fRefl.add(params, 'reflEnvIntensity', 0.0, 3.0, 0.01).name('Env Intensity').onChange(syncMaterialFromParams));
+reflCtrls.common.push(fRefl.add(params, 'reflRoughness', 0.0, 1.0, 0.001).name('Spread (Roughness)').onChange(syncMaterialFromParams));
+reflCtrls.common.push(fRefl.add(params, 'reflClearcoat', 0.0, 1.0, 0.001).name('Clearcoat').onChange(syncMaterialFromParams));
+reflCtrls.common.push(fRefl.add(params, 'reflClearcoatRoughness', 0.0, 1.0, 0.001).name('Coat Roughness').onChange(syncMaterialFromParams));
+reflCtrls.common.push(fRefl.add(params, 'reflVideoUpdateHz', 0.0, 12.0, 0.1).name('Video PMREM Hz'));
+
+reflCtrls.dielectric.push(fRefl.add(params, 'reflIOR', 1.0, 2.333, 0.001).name('IOR').onChange(syncMaterialFromParams));
+reflCtrls.dielectric.push(fRefl.add(params, 'reflSpecularIntensity', 0.0, 1.0, 0.001).name('Specular Intensity').onChange(syncMaterialFromParams));
+reflCtrls.dielectric.push(fRefl.addColor(params, 'reflSpecularColor').name('Specular Color').onChange(syncMaterialFromParams));
+
+reflCtrls.metal.push(fRefl.add(params, 'reflMetalness', 0.0, 1.0, 0.001).name('Metalness').onChange(syncMaterialFromParams));
+reflCtrls.metal.push(fRefl.addColor(params, 'reflMetalColor').name('Metal Color').onChange(syncMaterialFromParams));
+
+function setCtrlVisible(ctrl, visible) {
+  const el = ctrl?.domElement;
+  if (el) el.style.display = visible ? '' : 'none';
 }
-toggleReflUI();
+function updateReflVisibility() {
+  const isMetal = (params.reflWorkflow === 'metal');
+  reflCtrls.common.forEach(c => setCtrlVisible(c, true));
+  reflCtrls.dielectric.forEach(c => setCtrlVisible(c, !isMetal));
+  reflCtrls.metal.forEach(c => setCtrlVisible(c, isMetal));
+}
+syncMaterialFromParams();
+updateReflVisibility();
 
 // View
 const fView = gui.addFolder('View');
@@ -867,10 +890,9 @@ let _presets = {};
 
 function rebuildPresetsDropdown(names) {
   const opts = (names.length ? names : ['(none)']);
-  if (!presetsDrop) {
-    presetsDrop = fPresets.add(presetsCtl, 'selected', opts).name('Select');
-  } else if (typeof presetsDrop.options === 'function') {
-    presetsDrop = presetsDrop.options(opts); // lil-gui: options(...) updates choices
+  // Update dropdown options in-place (supported by lil‑gui)
+  if (presetsDrop && typeof presetsDrop.options === 'function') {
+    presetsDrop.options(opts);
   } else {
     presetsDrop = fPresets.add(presetsCtl, 'selected', opts).name('Select');
   }
@@ -891,30 +913,21 @@ function ingestPresetsData(data) {
 }
 
 async function loadPresetsFile() {
-  let data;
   try {
-    const url = `${PRESETS_URL}?t=${Date.now()}`;
-    const res = await fetch(url, { cache: 'no-store' });
+    const res = await fetch(`${PRESETS_URL}?t=${Date.now()}`, { cache: 'no-store' });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    data = await res.json();
-  } catch (netErr) {
-    console.warn(`[presets] Network/parse error for ${PRESETS_URL}:`, netErr);
-    try { rebuildPresetsDropdown([]); } catch {}
-    return;
+    const data = await res.json();
+    ingestPresetsData(data);
+  } catch (err) {
+    console.warn(`[presets] Could not fetch ${PRESETS_URL}:`, err);
+    rebuildPresetsDropdown([]);
   }
-  ingestPresetsData(data);
 }
 
 function refreshAllControllers(root) {
-  // refresh visible values without using gui.updateDisplay()
   if (!root) return;
-  if (Array.isArray(root.controllers)) {
-    root.controllers.forEach(c => c.updateDisplay && c.updateDisplay());
-  }
-  // lil‑gui stores folders in .children; recurse into folders
-  if (Array.isArray(root.children)) {
-    root.children.forEach(f => refreshAllControllers(f));
-  }
+  if (Array.isArray(root.controllers)) root.controllers.forEach(c => c.updateDisplay && c.updateDisplay());
+  if (Array.isArray(root.children)) root.children.forEach(f => refreshAllControllers(f));
 }
 
 function applyPreset(p) {
@@ -991,7 +1004,7 @@ function applyPreset(p) {
   }
   // Reflection (PBR)
   if (p.reflection) {
-    if (typeof p.reflection.mode === 'string') params.reflMode = p.reflection.mode;
+    if (typeof p.reflection.workflow === 'string') params.reflWorkflow = p.reflection.workflow;
     if (typeof p.reflection.flatShading === 'boolean') params.reflFlatShading = p.reflection.flatShading;
     if (isFinite(p.reflection.envIntensity)) params.reflEnvIntensity = p.reflection.envIntensity;
     if (isFinite(p.reflection.roughness))    params.reflRoughness    = p.reflection.roughness;
@@ -1004,7 +1017,7 @@ function applyPreset(p) {
     if (isFinite(p.reflection.clearcoatRoughness)) params.reflClearcoatRoughness = p.reflection.clearcoatRoughness;
     if (isFinite(p.reflection.videoPmremHz))       params.reflVideoUpdateHz      = p.reflection.videoPmremHz;
     syncMaterialFromParams();
-    toggleReflUI();
+    updateReflVisibility();
   }
   // View
   if (p.view && isFinite(p.view.exposure)) {
@@ -1063,7 +1076,7 @@ async function applyReflectionFromVideo(url) {
   await video.play().catch(() => {});
   const vtex = new THREE.VideoTexture(video);
   vtex.colorSpace = THREE.SRGBColorSpace;
-  await applyPMREMFromTexture(vtex); // initial PMREM; can refresh at Hz below
+  await applyPMREMFromTexture(vtex); // initial PMREM
   if (reflectionTex && reflectionTex.isTexture) reflectionTex.dispose();
   reflectionTex = vtex;
   reflectionVideo = video;
