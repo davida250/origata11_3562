@@ -27,7 +27,10 @@
       width: 100%;
       overflow: hidden;
     }
-    #scene-container { position: relative; background: #000; }
+    #scene-container {
+      position: relative; /* for overlay positioning */
+      background: #000;
+    }
     canvas { display: block; }
 
     #ui {
@@ -38,15 +41,21 @@
       padding: 8px 8px 24px 8px;
       overflow-y: auto;
     }
-    .brand {
+    /* Bottom-right brand overlay inside the main (left) frame */
+    .brand-overlay {
+      position: absolute;
+      right: 12px;
+      bottom: 12px;
+      text-align: right;
       font-size: 12px;
-      letter-spacing: .05em;
-      color: #9aa0a6;
-      margin: 6px 8px 14px 8px;
-      border-bottom: 1px solid #161616;
-      padding-bottom: 8px;
+      letter-spacing: .06em;
+      line-height: 1.25;
+      color: rgba(255,255,255,0.85);
+      text-shadow: 0 0 6px rgba(0,0,0,0.6);
+      pointer-events: none; /* don't block OrbitControls */
+      user-select: none;
     }
-    .brand b { color: var(--accent); }
+
     #ui .lil-gui.root {
       width: calc(var(--panel-width) - 16px) !important;
       max-width: calc(var(--panel-width) - 16px) !important;
@@ -66,11 +75,14 @@
 </head>
 <body>
   <div class="app">
-    <div id="scene-container" aria-label="Three.js canvas host"></div>
-    <aside id="ui">
-      <div class="brand">
-        <b>Endless Fold</b> — Brownian polygons • echo trails • presets • PBR reflections
+    <div id="scene-container" aria-label="Three.js canvas host">
+      <!-- Moved out of the control frame; lower-right inside main frame -->
+      <div class="brand-overlay">
+        Origata v0.48<br/>Ent
       </div>
+    </div>
+
+    <aside id="ui">
       <!-- lil-gui attaches here -->
     </aside>
   </div>
