@@ -1,14 +1,14 @@
 // Origata — Brownian polygon surface + echo trails + luma‑preserving RGB + Presets + Reflection Map + Intensity Control
 // --------------------------------------------------------------------------------------------------------------------
-// Built from your last working main.js, retaining glow/overlay/echo trails. :contentReference[oaicite:1]{index=1}
+// Keeps your original look (overlay stripes/iridescence, glow, trails) and fixes the presets/UI errors.
 //
-// Fixes:
-//  • Presets dropdown rebuild now uses controller.options(...) instead of folder.remove(...) (lil‑gui API). :contentReference[oaicite:2]{index=2}
-//  • Removed local file picker flow (only loads ./presets.json via fetch()).
-//  • Added "Reflection → Intensity" slider (envMapIntensity).
+// Key fixes:
+//  • Removed invalid gui.updateDisplay() calls (use controller.updateDisplay()) and updated dropdown options via
+//    controller.options(...), which returns a *replacement* controller in lil‑gui. :contentReference[oaicite:1]{index=1}
+//  • Clear separation of fetch vs. UI errors so "Could not fetch" is no longer emitted for UI exceptions.
+//  • Reflection map loader probes availability to avoid noisy 404s; falls back mp4→image→RoomEnvironment.
 //
-// Notes:
-//  • If reflection.mp4 404s, we fall back to reflection.{jpg|jpeg|png|webp}. No crash if none exist.
+// This file assumes index.html and presets.json are in the same folder. (reflection.{mp4|jpg|jpeg|png|webp} optional)
 
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
@@ -51,11 +51,11 @@ controls.maxDistance = 9.0;
 const pmrem = new THREE.PMREMGenerator(renderer);
 const defaultEnvRT = pmrem.fromScene(new RoomEnvironment(), 0.04);
 scene.environment = defaultEnvRT.texture;
-let activeEnvRT = defaultEnvRT;     // keep track so we can dispose previous custom RTs
-let reflectionVideo = null;         // HTMLVideoElement, if using video map
+let activeEnvRT = defaultEnvRT;     // track active PMREM to dispose when replaced
+let reflectionVideo = null;         // HTMLVideoElement if using mp4
 let reflectionTex = null;           // THREE.VideoTexture or THREE.Texture
 
-// ---------- overlay shader (unchanged look) ----------
+// ---------- overlay shader (your original look preserved) ----------
 function injectOverlay(material) {
   const uniforms = {
     uTime:         { value: 0 },
@@ -450,14 +450,15 @@ function randn() { // Gaussian
 }
 
 // ---------- post pipeline ----------
+// Base render
 const composer = new EffectComposer(renderer);
 const renderPass = new RenderPass(scene, camera);
 composer.addPass(renderPass);
 
-// Save the current frame (for trail composition / "base")
+// Save the current frame (for trail composition / "base" that remains crisp)
 const saveBaseRT = new THREE.WebGLRenderTarget(container.clientWidth, container.clientHeight, { depthBuffer: false, stencilBuffer: false });
 const saveBasePass = new SavePass(saveBaseRT);
-saveBasePass.enabled = false;
+saveBasePass.enabled = false; // only when trails are enabled
 composer.addPass(saveBasePass);
 
 // Afterimage (temporal accumulator)
@@ -517,12 +518,14 @@ const TrailCompositeShader = {
     }
 
     void main(){
-      vec3 base     = texture2D(tBase,    vUv).rgb;
+      vec3 base     = texture2D(tBase,    vUv).rgb;                       // crisp base, never dim/blur
       vec3 afterImg = (uBlurPx > 0.0001) ? blur9(tDiffuse, vUv)
-                                         : texture2D(tDiffuse, vUv).rgb;
+                                         : texture2D(tDiffuse, vUv).rgb;  // blurred history only
 
+      // history ≈ afterimage - (1-damp)*base => current frame removed, only echoes remain
       vec3 history = max(afterImg - (1.0 - uDamp) * base, vec3(0.0));
 
+      // tone only on history (echo brightness/shape)
       float l = dot(history, vec3(0.2126, 0.7152, 0.0722));
       history = mix(vec3(l), history, uSaturation);
       history = pow(max(history, 0.0), vec3(1.0 / max(0.0001, uGamma)));
@@ -571,6 +574,7 @@ const RGBShiftLumaShader = {
 
       vec3 shifted = vec3(cr.r, base.g, cb.b);
 
+      // preserve scene luma
       const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
       float lBase = dot(base.rgb, LUMA);
       float lSh   = max(1e-5, dot(shifted, LUMA));
@@ -653,7 +657,7 @@ const surface = new BrownianSurface({
   breakDist: params.breakDist
 });
 
-// --- GUI folders ---
+// --- Presets (JSON) ---
 const fPresets = gui.addFolder('Presets');
 const presetsCtl = {
   selected: '(none)',
@@ -674,14 +678,18 @@ const fSys = gui.addFolder('Brownian Surface');
 fSys.add(params, 'count', 4, 200, 1).name('Vertices').onFinishChange(v => surface.setCount(v));
 fSys.add(params, 'amp', 0.0, 2.0, 0.001).name('Amplitude').onChange(v => surface.params.amp = v);
 fSys.add(params, 'freq', 0.0, 3.0, 0.001).name('Frequency').onChange(v => surface.params.freq = v);
-fSys.add(params, 'connectDist', 0.05, 2.0, 0.001).name('Connect (≤)').onChange(v => {
+const connectCtrl = fSys.add(params, 'connectDist', 0.05, 2.0, 0.001).name('Connect (≤)').onChange(v => {
   surface.params.connectDist = v;
-  if (params.breakDist < v) { params.breakDist = v; surface.params.breakDist = v; gui.updateDisplay(); }
+  if (params.breakDist < v) {
+    params.breakDist = v;
+    surface.params.breakDist = v;
+    breakCtrl.updateDisplay(); // refresh the one controller that changed
+  }
 });
-fSys.add(params, 'breakDist', 0.05, 2.0, 0.001).name('Break (≥)').onChange(v => {
+const breakCtrl = fSys.add(params, 'breakDist', 0.05, 2.0, 0.001).name('Break (≥)').onChange(v => {
   surface.params.breakDist = Math.max(v, params.connectDist);
   params.breakDist = surface.params.breakDist;
-  gui.updateDisplay();
+  breakCtrl.updateDisplay();
 });
 
 const fAnim = gui.addFolder('Animation');
@@ -751,7 +759,7 @@ function updateTrailUniforms() {
 }
 function updateTrailEnabled() {
   const enabled = params.trailEnabled;
-  saveBasePass.enabled        = enabled;
+  saveBasePass.enabled        = enabled;   // disable when trails are off
   afterimagePass.enabled      = enabled;
   trailCompositePass.enabled  = enabled;
   updateTrailUniforms();
@@ -777,35 +785,51 @@ let _presets = {};
 
 function rebuildPresetsDropdown(names) {
   const opts = (names.length ? names : ['(none)']);
-  if (presetsDrop && typeof presetsDrop.options === 'function') {
-    // Safe way to update choices without removing controller. :contentReference[oaicite:3]{index=3}
-    presetsDrop.options(opts);
+  if (!presetsDrop) {
+    presetsDrop = fPresets.add(presetsCtl, 'selected', opts).name('Select');
+  } else if (typeof presetsDrop.options === 'function') {
+    // lil‑gui's options(...) returns a *replacement* controller. Keep the new one. :contentReference[oaicite:2]{index=2}
+    presetsDrop = presetsDrop.options(opts);
   } else {
+    // fallback (shouldn't happen)
     presetsDrop = fPresets.add(presetsCtl, 'selected', opts).name('Select');
   }
-  presetsCtl.selected = opts[0];
-  gui.updateDisplay();
+  if (!opts.includes(presetsCtl.selected)) presetsCtl.selected = opts[0];
+  if (typeof presetsDrop.updateDisplay === 'function') presetsDrop.updateDisplay();
 }
 
 function ingestPresetsData(data) {
   const map = data?.presets || {};
   _presets = map;
   const names = Object.keys(_presets);
-  rebuildPresetsDropdown(names);
-  console.info(`[presets] Loaded ${names.length} preset(s).`);
+  try {
+    rebuildPresetsDropdown(names);
+    console.info(`[presets] Loaded ${names.length} preset(s).`);
+  } catch (uiErr) {
+    console.warn('[presets] UI rebuild error:', uiErr);
+  }
 }
 
 async function loadPresetsFile() {
+  let data;
   try {
     const url = `${PRESETS_URL}?t=${Date.now()}`; // avoid cache
     const res = await fetch(url, { cache: 'no-store' });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = await res.json();
-    ingestPresetsData(data);
-  } catch (e) {
-    console.warn(`[presets] Could not fetch ${PRESETS_URL}:`, e);
-    rebuildPresetsDropdown([]); // leave "(none)"
+    data = await res.json();
+  } catch (netErr) {
+    console.warn(`[presets] Network/parse error for ${PRESETS_URL}:`, netErr);
+    // keep "(none)"
+    try { rebuildPresetsDropdown([]); } catch {}
+    return;
   }
+  ingestPresetsData(data);
+}
+
+function refreshAllControllers(root) {
+  // update visible values without relying on non-existent gui.updateDisplay()
+  root.controllers?.forEach(c => c.updateDisplay?.());
+  root.folders?.forEach(f => refreshAllControllers(f));
 }
 
 function applyPreset(p) {
@@ -890,26 +914,17 @@ function applyPreset(p) {
     params.exposure = p.view.exposure;
     renderer.toneMappingExposure = params.exposure;
   }
-  gui.updateDisplay();
+  // Refresh visible values
+  refreshAllControllers(gui);
 }
 loadPresetsFile();
 
 // ---------- Reflection map loader (mp4 or image) ----------
-async function loadReflectionAuto(logOn = false) {
+async function exists(url) {
   try {
-    await applyReflectionFromVideo('reflection.mp4');
-    if (logOn) console.info('[reflection] Loaded reflection.mp4');
-  } catch {
-    const candidates = ['reflection.jpg', 'reflection.jpeg', 'reflection.png', 'reflection.webp'];
-    for (const name of candidates) {
-      try {
-        await applyReflectionFromImage(name);
-        if (logOn) console.info(`[reflection] Loaded ${name}`);
-        return;
-      } catch {}
-    }
-    if (logOn) console.info('[reflection] No reflection.* found, using RoomEnvironment.');
-  }
+    const r = await fetch(url, { method: 'HEAD', cache: 'no-store' });
+    return r.ok;
+  } catch { return false; }
 }
 function disposeActiveEnvRT(keepDefault = true) {
   if (activeEnvRT && activeEnvRT !== defaultEnvRT) {
@@ -955,6 +970,27 @@ async function applyReflectionFromVideo(url) {
   if (reflectionTex && reflectionTex.isTexture) reflectionTex.dispose();
   reflectionTex = vtex;
   reflectionVideo = video;
+}
+async function loadReflectionAuto(logOn = false) {
+  // Try mp4 first (silent probe), then images; if none, keep RoomEnvironment.
+  try {
+    if (await exists('reflection.mp4')) {
+      await applyReflectionFromVideo('reflection.mp4');
+      if (logOn) console.info('[reflection] Loaded reflection.mp4');
+      return;
+    }
+    const candidates = ['reflection.jpg', 'reflection.jpeg', 'reflection.png', 'reflection.webp'];
+    for (const name of candidates) {
+      if (await exists(name)) {
+        await applyReflectionFromImage(name);
+        if (logOn) console.info(`[reflection] Loaded ${name}`);
+        return;
+      }
+    }
+    if (logOn) console.info('[reflection] No reflection.* found, using RoomEnvironment.');
+  } catch (e) {
+    if (logOn) console.warn('[reflection] Load error:', e);
+  }
 }
 loadReflectionAuto(false);
 
