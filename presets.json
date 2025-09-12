@@ -120,8 +120,8 @@
       "reflection": {
         "workflow": "metal",
         "flatShading": true,
-        "envIntensity": 2.0,
-        "roughness": 0.08,
+        "envIntensity": 2.2,
+        "roughness": 0.06,
         "metalness": 1.0,
         "ior": 1.5,
         "specularIntensity": 1.0,
