@@ -1,5 +1,6 @@
-// Origata
-
+// Origata — Brownian polygon surface + echo trails + luma‑preserving RGB + Presets + Reflection Map
+// -----------------------------------------------------------------------------------------------
+// Base: your last working build (post chain fix, bright base + fading echoes, surface-anchored points). :contentReference[oaicite:1]{index=1}
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
@@ -37,9 +38,13 @@ controls.dampingFactor = 0.06;
 controls.minDistance = 2.0;
 controls.maxDistance = 9.0;
 
+// Environment (default RoomEnvironment → replaced by reflection file if present)
 const pmrem = new THREE.PMREMGenerator(renderer);
-const envRT = pmrem.fromScene(new RoomEnvironment(), 0.04);
-scene.environment = envRT.texture;
+const defaultEnvRT = pmrem.fromScene(new RoomEnvironment(), 0.04);
+scene.environment = defaultEnvRT.texture;
+let activeEnvRT = defaultEnvRT;     // keep track so we can dispose previous custom RTs
+let reflectionVideo = null;         // HTMLVideoElement, if using video map
+let reflectionTex = null;           // THREE.VideoTexture or THREE.Texture
 
 // ---------- overlay shader (unchanged look) ----------
 function injectOverlay(material) {
@@ -436,7 +441,6 @@ function randn() { // Gaussian
 }
 
 // ---------- post pipeline ----------
-// Base render
 const composer = new EffectComposer(renderer);
 const renderPass = new RenderPass(scene, camera);
 composer.addPass(renderPass);
@@ -444,20 +448,20 @@ composer.addPass(renderPass);
 // Save the current frame (for trail composition / "base")
 const saveBaseRT = new THREE.WebGLRenderTarget(container.clientWidth, container.clientHeight, { depthBuffer: false, stencilBuffer: false });
 const saveBasePass = new SavePass(saveBaseRT);
-saveBasePass.enabled = false;              // <- only on when trails are enabled
+saveBasePass.enabled = false;
 composer.addPass(saveBasePass);
 
-// Afterimage (temporal accumulator) — not rendered to screen directly
+// Afterimage (temporal accumulator)
 const afterimagePass = new AfterimagePass();
 afterimagePass.enabled = false;
 afterimagePass.uniforms['damp'].value = 0.96;
 composer.addPass(afterimagePass);
 
-// TrailComposite shader: isolate history = afterimage - (1-damp)*base; add to base (crisp).
+// TrailComposite shader (history only) + base preserved crisp
 const TrailCompositeShader = {
   uniforms: {
-    tDiffuse:      { value: null }, // comes from previous pass (afterimage)
-    tBase:         { value: null }, // assigned AFTER pass creation
+    tDiffuse:      { value: null },
+    tBase:         { value: null },
     uDamp:         { value: afterimagePass.uniforms['damp'].value },
 
     uGain:         { value: 1.0 },
@@ -504,14 +508,12 @@ const TrailCompositeShader = {
     }
 
     void main(){
-      vec3 base     = texture2D(tBase,    vUv).rgb;                       // crisp base, never dim/blur
+      vec3 base     = texture2D(tBase,    vUv).rgb;
       vec3 afterImg = (uBlurPx > 0.0001) ? blur9(tDiffuse, vUv)
-                                         : texture2D(tDiffuse, vUv).rgb;  // blurred history only
+                                         : texture2D(tDiffuse, vUv).rgb;
 
-      // history ≈ afterimage - (1-damp)*base => current frame removed, only echoes remain
       vec3 history = max(afterImg - (1.0 - uDamp) * base, vec3(0.0));
 
-      // tone only on history (echo brightness/shape)
       float l = dot(history, vec3(0.2126, 0.7152, 0.0722));
       history = mix(vec3(l), history, uSaturation);
       history = pow(max(history, 0.0), vec3(1.0 / max(0.0001, uGamma)));
@@ -524,7 +526,7 @@ const TrailCompositeShader = {
 };
 const trailCompositePass = new ShaderPass(TrailCompositeShader);
 trailCompositePass.enabled = false;
-trailCompositePass.uniforms.tBase.value = saveBaseRT.texture; // assign AFTER creation
+trailCompositePass.uniforms.tBase.value = saveBaseRT.texture; // set after pass construction
 composer.addPass(trailCompositePass);
 
 // Bloom (kept)
@@ -535,7 +537,7 @@ const bloomPass = new UnrealBloomPass(
 bloomPass.enabled = false;
 composer.addPass(bloomPass);
 
-// Luma‑preserving RGB shift (keeps perceived brightness constant)
+// Luma‑preserving RGB shift
 const RGBShiftLumaShader = {
   uniforms: {
     tDiffuse: { value: null },
@@ -560,7 +562,6 @@ const RGBShiftLumaShader = {
 
       vec3 shifted = vec3(cr.r, base.g, cb.b);
 
-      // preserve scene luma
       const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
       float lBase = dot(base.rgb, LUMA);
       float lSh   = max(1e-5, dot(shifted, LUMA));
@@ -574,11 +575,11 @@ const rgbShiftPass = new ShaderPass(RGBShiftLumaShader);
 rgbShiftPass.enabled = false;
 composer.addPass(rgbShiftPass);
 
-// Always-on final output so the screen is never black
+// Always-on final output
 const outputPass = new OutputPass();
 composer.addPass(outputPass);
 
-// ---------- GUI ----------
+// ---------- GUI + parameters ----------
 const uiHost = document.getElementById('ui');
 const gui = new GUI({ title: 'Controls', width: 320 });
 uiHost.appendChild(gui.domElement);
@@ -586,7 +587,7 @@ uiHost.appendChild(gui.domElement);
 const params = {
   // Brownian surface
   primitive:     'sphere',  // 'sphere' | 'cube' | 'torus'
-  surfaceJitter: 0.12,      // initial ± offset along surface normal
+  surfaceJitter: 0.12,
   count:         36,
   amp:           0.85,
   freq:          0.9,
@@ -597,18 +598,18 @@ const params = {
   play:       true,
   timeScale:  1.0,
 
-  // Bloom (same)
+  // Bloom
   bloomStrength: 0.0,
   bloomThreshold:0.9,
   bloomRadius:   0.2,
 
   // Trails (Echoes)
   trailEnabled:     false,
-  trailPersistence: 96.0, // % kept each step (0..99.9). Higher => longer history
-  trailHalfLife:    0.0,  // seconds; if >0, overrides persistence each frame
-  trailBlurPx:      0.75, // pixels
+  trailPersistence: 96.0,
+  trailHalfLife:    0.0,
+  trailBlurPx:      0.75,
   trailBlurSigma:   1.0,
-  trailGain:        1.0,  // echo brightness
+  trailGain:        1.0,
   trailGamma:       1.0,
   trailSaturation:  1.0,
   trailClear:       () => { _clearTrailsNext = true; },
@@ -640,14 +641,19 @@ const surface = new BrownianSurface({
   breakDist: params.breakDist
 });
 
-// Surface source
+// --- GUI folders ---
+const fPresets = gui.addFolder('Presets');
+const presetsCtl = { selected: '(none)', load: () => { if (presetsCtl.selected in _presets) applyPreset(_presets[presetsCtl.selected]); }, reload: () => loadPresetsFile() };
+let presetsDrop = fPresets.add(presetsCtl, 'selected', ['(none)']).name('Select');
+fPresets.add(presetsCtl, 'load').name('Load');
+fPresets.add(presetsCtl, 'reload').name('Reload presets.json');
+
 const fSrc = gui.addFolder('Surface Source');
 fSrc.add(params, 'primitive', { Sphere: 'sphere', Cube: 'cube', Torus: 'torus' })
    .name('Primitive').onChange(v => surface.setSurfaceType(v));
 fSrc.add(params, 'surfaceJitter', 0.0, 0.6, 0.001).name('± Offset')
     .onFinishChange(v => surface.setSurfaceJitter(v));
 
-// Brownian Surface
 const fSys = gui.addFolder('Brownian Surface');
 fSys.add(params, 'count', 4, 200, 1).name('Vertices').onFinishChange(v => surface.setCount(v));
 fSys.add(params, 'amp', 0.0, 2.0, 0.001).name('Amplitude').onChange(v => surface.params.amp = v);
@@ -662,12 +668,10 @@ fSys.add(params, 'breakDist', 0.05, 2.0, 0.001).name('Break (≥)').onChange(v =
   gui.updateDisplay();
 });
 
-// Animation
 const fAnim = gui.addFolder('Animation');
 fAnim.add(params, 'play').name('Play / Pause');
 fAnim.add(params, 'timeScale', 0.0, 3.0, 0.01).name('Time Scale');
 
-// Glow (Bloom)
 const fGlow = gui.addFolder('Glow (Bloom)');
 fGlow.add(params, 'bloomStrength', 0.0, 2.5, 0.01).name('Strength').onChange(v => {
   bloomPass.strength = v;
@@ -676,7 +680,6 @@ fGlow.add(params, 'bloomStrength', 0.0, 2.5, 0.01).name('Strength').onChange(v =
 fGlow.add(params, 'bloomThreshold', 0.0, 1.0, 0.001).name('Threshold').onChange(v => bloomPass.threshold = v);
 fGlow.add(params, 'bloomRadius', 0.0, 1.0, 0.001).name('Radius').onChange(v => bloomPass.radius = v);
 
-// Trails (Echoes)
 const fTrail = gui.addFolder('Trails (Echoes)');
 fTrail.add(params, 'trailEnabled').name('Enable').onChange(updateTrailEnabled);
 fTrail.add(params, 'trailPersistence', 0.0, 99.9, 0.1).name('Persistence (%)');
@@ -688,7 +691,6 @@ fTrail.add(params, 'trailGamma', 0.5, 2.5, 0.01).name('Echo Gamma').onChange(upd
 fTrail.add(params, 'trailSaturation', 0.0, 2.0, 0.01).name('Echo Saturation').onChange(updateTrailUniforms);
 fTrail.add(params, 'trailClear').name('Clear Trails');
 
-// RGB (luma‑neutral)
 const fRGB = gui.addFolder('RGB Offset (Luma‑neutral)');
 fRGB.add(params, 'rgbAmount', 0.0, 0.10, 0.0001).name('Amount').onChange(updateRGBEnabled);
 fRGB.add(params, 'rgbAngle', 0.0, 360.0, 0.1).name('Angle (°)')
@@ -702,7 +704,7 @@ const fView = gui.addFolder('View');
 fView.add(params, 'exposure', 0.6, 1.8, 0.01).name('Exposure').onChange(v => renderer.toneMappingExposure = v);
 fView.add(params, 'resetCamera').name('Reset Camera');
 
-// overlay advanced (optional)
+// Overlay advanced controls
 const surfaceAdv = { angle: 28, angle2: 82, speed: 0.25, freq1: 6.0, freq2: 9.5, strength: 0.52, triScale: 1.15, warp: 0.55, cellAmp: 0.55, cellFreq: 2.75 };
 const U = () => surface?.mesh.material.userData._overlayUniforms;
 const fSurfaceAdv = gui.addFolder('Surface (Advanced)');
@@ -728,7 +730,7 @@ function updateTrailUniforms() {
 }
 function updateTrailEnabled() {
   const enabled = params.trailEnabled;
-  saveBasePass.enabled        = enabled;   // <- crucial: disable when trails are off
+  saveBasePass.enabled        = enabled;
   afterimagePass.enabled      = enabled;
   trailCompositePass.enabled  = enabled;
   updateTrailUniforms();
@@ -739,6 +741,182 @@ function updateRGBEnabled() {
 }
 updateTrailEnabled();
 updateRGBEnabled();
+
+// ---------- Presets (JSON) ----------
+const PRESETS_URL = 'presets.json';
+let _presets = {};
+async function loadPresetsFile() {
+  try {
+    const res = await fetch(PRESETS_URL, { cache: 'no-store' });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    const map = data?.presets || {};
+    _presets = map;
+    // refresh dropdown options
+    const names = Object.keys(_presets);
+    const opts  = names.length ? names : ['(none)'];
+    // rebuild the controller to update options
+    fPresets.remove(presetsDrop);
+    presetsCtl.selected = opts[0];
+    presetsDrop = fPresets.add(presetsCtl, 'selected', opts).name('Select');
+    console.info(`[presets] Loaded ${names.length} preset(s) from ${PRESETS_URL}`);
+  } catch (e) {
+    console.warn(`[presets] Could not load ${PRESETS_URL}:`, e);
+    // keep (none)
+    fPresets.remove(presetsDrop);
+    presetsCtl.selected = '(none)';
+    presetsDrop = fPresets.add(presetsCtl, 'selected', ['(none)']).name('Select');
+  }
+}
+function applyPreset(p) {
+  if (!p) return;
+  // Surface
+  if (p.surface) {
+    if (typeof p.surface.primitive === 'string') { params.primitive = p.surface.primitive; surface.setSurfaceType(params.primitive); }
+    if (isFinite(p.surface.surfaceJitter)) { params.surfaceJitter = p.surface.surfaceJitter; surface.setSurfaceJitter(params.surfaceJitter); }
+    if (isFinite(p.surface.count)) { params.count = Math.floor(p.surface.count); surface.setCount(params.count); }
+    if (isFinite(p.surface.amp)) { params.amp = p.surface.amp; surface.params.amp = params.amp; }
+    if (isFinite(p.surface.freq)) { params.freq = p.surface.freq; surface.params.freq = params.freq; }
+    if (isFinite(p.surface.connectDist)) { params.connectDist = p.surface.connectDist; surface.params.connectDist = params.connectDist; }
+    if (isFinite(p.surface.breakDist)) { params.breakDist = Math.max(p.surface.breakDist, params.connectDist); surface.params.breakDist = params.breakDist; }
+  }
+  // Animation
+  if (p.animation) {
+    if (typeof p.animation.play === 'boolean') params.play = p.animation.play;
+    if (isFinite(p.animation.timeScale)) params.timeScale = p.animation.timeScale;
+  }
+  // Bloom
+  if (p.bloom) {
+    if (isFinite(p.bloom.bloomStrength)) { params.bloomStrength = p.bloom.bloomStrength; bloomPass.strength = params.bloomStrength; bloomPass.enabled = params.bloomStrength > 0.0; }
+    if (isFinite(p.bloom.bloomThreshold)) { params.bloomThreshold = p.bloom.bloomThreshold; bloomPass.threshold = params.bloomThreshold; }
+    if (isFinite(p.bloom.bloomRadius)) { params.bloomRadius = p.bloom.bloomRadius; bloomPass.radius = params.bloomRadius; }
+  }
+  // Trails
+  if (p.trails) {
+    if (typeof p.trails.trailEnabled === 'boolean') params.trailEnabled = p.trails.trailEnabled;
+    if (isFinite(p.trails.trailPersistence)) params.trailPersistence = p.trails.trailPersistence;
+    if (isFinite(p.trails.trailHalfLife))    params.trailHalfLife    = p.trails.trailHalfLife;
+    if (isFinite(p.trails.trailBlurPx))      params.trailBlurPx      = p.trails.trailBlurPx;
+    if (isFinite(p.trails.trailBlurSigma))   params.trailBlurSigma   = p.trails.trailBlurSigma;
+    if (isFinite(p.trails.trailGain))        params.trailGain        = p.trails.trailGain;
+    if (isFinite(p.trails.trailGamma))       params.trailGamma       = p.trails.trailGamma;
+    if (isFinite(p.trails.trailSaturation))  params.trailSaturation  = p.trails.trailSaturation;
+    updateTrailEnabled(); updateTrailUniforms();
+  }
+  // RGB offset
+  if (p.rgb) {
+    if (isFinite(p.rgb.rgbAmount))     params.rgbAmount   = p.rgb.rgbAmount;
+    if (isFinite(p.rgb.rgbAngle))      params.rgbAngle    = p.rgb.rgbAngle;
+    if (typeof p.rgb.rgbAnimate === 'boolean') params.rgbAnimate = p.rgb.rgbAnimate;
+    if (isFinite(p.rgb.rgbSpinHz))     params.rgbSpinHz   = p.rgb.rgbSpinHz;
+    if (isFinite(p.rgb.rgbPulseAmp))   params.rgbPulseAmp = p.rgb.rgbPulseAmp;
+    if (isFinite(p.rgb.rgbPulseHz))    params.rgbPulseHz  = p.rgb.rgbPulseHz;
+    updateRGBEnabled();
+    rgbShiftPass.uniforms['angle'].value = THREE.MathUtils.degToRad(params.rgbAngle);
+  }
+  // Overlay
+  if (p.overlay) {
+    surfaceAdv.angle    = p.overlay.angle    ?? surfaceAdv.angle;
+    surfaceAdv.angle2   = p.overlay.angle2   ?? surfaceAdv.angle2;
+    surfaceAdv.speed    = p.overlay.speed    ?? surfaceAdv.speed;
+    surfaceAdv.freq1    = p.overlay.freq1    ?? surfaceAdv.freq1;
+    surfaceAdv.freq2    = p.overlay.freq2    ?? surfaceAdv.freq2;
+    surfaceAdv.strength = p.overlay.strength ?? surfaceAdv.strength;
+    surfaceAdv.triScale = p.overlay.triScale ?? surfaceAdv.triScale;
+    surfaceAdv.warp     = p.overlay.warp     ?? surfaceAdv.warp;
+    surfaceAdv.cellAmp  = p.overlay.cellAmp  ?? surfaceAdv.cellAmp;
+    surfaceAdv.cellFreq = p.overlay.cellFreq ?? surfaceAdv.cellFreq;
+    const u = U();
+    if (u) {
+      u.uBandAngle.value    = THREE.MathUtils.degToRad(surfaceAdv.angle);
+      u.uBandAngle2.value   = THREE.MathUtils.degToRad(surfaceAdv.angle2);
+      u.uBandSpeed.value    = surfaceAdv.speed;
+      u.uBandFreq1.value    = surfaceAdv.freq1;
+      u.uBandFreq2.value    = surfaceAdv.freq2;
+      u.uBandStrength.value = surfaceAdv.strength;
+      u.uTriScale.value     = surfaceAdv.triScale;
+      u.uWarp.value         = surfaceAdv.warp;
+      u.uCellAmp.value      = surfaceAdv.cellAmp;
+      u.uCellFreq.value     = surfaceAdv.cellFreq;
+    }
+  }
+  // View
+  if (p.view && isFinite(p.view.exposure)) {
+    params.exposure = p.view.exposure;
+    renderer.toneMappingExposure = params.exposure;
+  }
+  gui.updateDisplay();
+}
+loadPresetsFile(); // attempt load at startup
+
+// ---------- Reflection map loader (mp4 or image) ----------
+async function loadReflectionAuto() {
+  // try video first, then fallback to common image names
+  try {
+    await applyReflectionFromVideo('reflection.mp4');
+    console.info('[reflection] Loaded reflection.mp4');
+  } catch {
+    const candidates = ['reflection.jpg', 'reflection.jpeg', 'reflection.png', 'reflection.webp'];
+    for (const name of candidates) {
+      try {
+        await applyReflectionFromImage(name);
+        console.info(`[reflection] Loaded ${name}`);
+        return;
+      } catch {}
+    }
+    console.info('[reflection] No reflection.* found, using RoomEnvironment.');
+  }
+}
+function disposeActiveEnvRT(keepDefault = true) {
+  if (activeEnvRT && activeEnvRT !== defaultEnvRT) {
+    activeEnvRT.dispose();
+  } else if (!keepDefault && activeEnvRT === defaultEnvRT) {
+    activeEnvRT.dispose();
+  }
+}
+async function applyReflectionFromImage(url) {
+  // LDR equirectangular image → PMREM
+  const tex = await new Promise((resolve, reject) => {
+    const loader = new THREE.TextureLoader();
+    loader.load(url, resolve, undefined, reject);
+  });
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.mapping = THREE.EquirectangularReflectionMapping; // tell three.js it's equirectangular
+  disposeActiveEnvRT();
+  const rt = pmrem.fromEquirectangular(tex);
+  scene.environment = rt.texture;
+  activeEnvRT = rt;
+  if (reflectionTex && reflectionTex.isTexture) reflectionTex.dispose();
+  reflectionTex = tex;
+}
+async function applyReflectionFromVideo(url) {
+  // Equirectangular video as environment (mapped directly)
+  const video = document.createElement('video');
+  video.src = url;
+  video.crossOrigin = 'anonymous';
+  video.loop = true;
+  video.muted = true;
+  video.playsInline = true;
+  video.preload = 'auto';
+  await new Promise((resolve, reject) => {
+    const onErr = () => reject(new Error('Video load error'));
+    video.addEventListener('error', onErr, { once: true });
+    video.addEventListener('canplay', () => resolve(), { once: true });
+  });
+  await video.play().catch(() => {}); // allow autoplay (muted)
+  const vtex = new THREE.VideoTexture(video);
+  vtex.colorSpace = THREE.SRGBColorSpace;
+  vtex.mapping = THREE.EquirectangularReflectionMapping;
+  // For dynamic video we map directly; PMREM per-frame is heavy. (See notes below.)
+  scene.environment = vtex;
+  // clean up previous
+  disposeActiveEnvRT(false); // we are not using a PMREM RT here
+  activeEnvRT = null;
+  if (reflectionTex && reflectionTex.isTexture) reflectionTex.dispose();
+  reflectionTex = vtex;
+  reflectionVideo = video;
+}
+loadReflectionAuto();
 
 // ---------- loop ----------
 let tPrev = performance.now();
@@ -760,7 +938,7 @@ function animate() {
     surface.update(dt, now / 1000);
   }
 
-  // Trails: compute damp (per-frame), push into passes.
+  // Trails damp
   if (params.trailEnabled) {
     let damp = (params.trailHalfLife > 0)
       ? Math.exp(-Math.LN2 * Math.max(1e-6, dt) / params.trailHalfLife)
@@ -771,7 +949,7 @@ function animate() {
     trailCompositePass.uniforms['uDamp'].value = damp;
   }
 
-  // RGB offset animation (brightness preserved in shader)
+  // RGB offset animation
   let rgbAngle = THREE.MathUtils.degToRad(params.rgbAngle);
   if (params.rgbAnimate && params.rgbSpinHz > 0) {
     rgbAngle += 2.0 * Math.PI * params.rgbSpinHz * (now / 1000);
