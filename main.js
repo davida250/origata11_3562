@@ -1,7 +1,6 @@
-// :contentReference[oaicite:1]{index=1}
 // Origata — Brownian polygon surface + echo trails + luma‑preserving RGB + Presets
-// Reflection: explicit envMap binding + PMREM/video/image envs + robust background toggle.
-// Also adds a procedural equirect fallback so "Show Env Background" always displays something.
+// Reflection fix: robust mp4 first-frame gating + guaranteed visible background fallback,
+//                 while keeping existing UI/logic unchanged.
 
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
@@ -305,6 +304,7 @@ class BrownianSurface {
     }
   }
 
+  // k‑NN seeding; if makeCliques, also connect the two nearest neighbors together
   _seedInitialGraph(k = 4, makeCliques = true) {
     const N = this.N, P = this.pos, S = this.state;
     for (let i = 0; i < N; i++) {
@@ -737,7 +737,7 @@ function bindEnvironmentToMaterials() {
   });
   // Show the *raw* equirect texture as a sky when requested; PMREM is lighting-only
   if (params.reflShowBackground) {
-    scene.background = envBackgroundTex || scene.environment || new THREE.Color(0x000000);
+    scene.background = envBackgroundTex || new THREE.Color(0x000000);
   } else {
     scene.background = new THREE.Color(0x000000);
   }
@@ -1070,7 +1070,7 @@ function applyPreset(p) {
 }
 loadPresetsFile();
 
-// ---------- Reflection map loader (mp4 or image) with PMREM ----------
+// ---------- Reflection map loader (mp4 or image) with PMREM + robust first-frame gating ----------
 async function exists(url) {
   try { const r = await fetch(url, { method: 'HEAD', cache: 'no-store' }); if (r.ok) return true; } catch {}
   try { const r2 = await fetch(url, { method: 'GET', cache: 'no-store' }); return r2.ok; } catch {}
@@ -1120,6 +1120,36 @@ async function waitForVideoDimensions(video) {
     check();
   });
 }
+// Ensure a real frame was decoded; otherwise VideoTexture often appears black.
+async function waitForFirstFrame(video, timeoutMs = 4000) {
+  if ('requestVideoFrameCallback' in video) {
+    return new Promise((resolve, reject) => {
+      let done = false;
+      const to = setTimeout(() => { if (!done) { done = true; reject(new Error('no rVFC frame')); } }, timeoutMs);
+      video.requestVideoFrameCallback(() => {
+        if (!done) { done = true; clearTimeout(to); resolve(); }
+      });
+    });
+  }
+  return new Promise((resolve, reject) => {
+    let done = false;
+    const finish = () => { if (!done) { done = true; cleanup(); resolve(); } };
+    const fail   = () => { if (!done) { done = true; cleanup(); reject(new Error('no first frame')); } };
+    const cleanup = () => {
+      clearTimeout(to);
+      video.removeEventListener('timeupdate', finish);
+      video.removeEventListener('playing', finish);
+      video.removeEventListener('seeked', finish);
+      video.removeEventListener('canplay', finish);
+    };
+    const to = setTimeout(fail, timeoutMs);
+    if (video.readyState >= 2 && video.videoWidth > 0) { finish(); return; }
+    video.addEventListener('timeupdate', finish, { once: true });
+    video.addEventListener('playing',   finish, { once: true });
+    video.addEventListener('seeked',    finish, { once: true });
+    video.addEventListener('canplay',   finish, { once: true });
+  });
+}
 async function makePMREMOrNull(tex) {
   try {
     if (!tex || !tex.image) return null;
@@ -1143,7 +1173,7 @@ async function applyEnvFromTexture(tex) {
   tex.mapping = THREE.EquirectangularReflectionMapping;
   const rt = await makePMREMOrNull(tex);
   if (rt) return setSceneEnvFromPMREM(rt);
-  // Fallback to raw equirectangular
+  // Fallback to raw equirectangular (not ideal lighting, but visible)
   return setSceneEnvRaw(tex);
 }
 async function applyReflectionFromImage(url) {
@@ -1157,27 +1187,59 @@ async function applyReflectionFromImage(url) {
   if (reflectionTex && reflectionTex.isTexture) reflectionTex.dispose();
   reflectionTex = tex;
   await applyEnvFromTexture(reflectionTex);
+  bindEnvironmentToMaterials();
 }
 async function applyReflectionFromVideo(url) {
+  // Create and prepare the element
   const video = document.createElement('video');
   video.src = url;
   video.crossOrigin = 'anonymous';
+  video.setAttribute('crossorigin', 'anonymous');
   video.loop = true;
   video.muted = true;
   video.playsInline = true;
   video.preload = 'auto';
+
+  // Await metadata + try to start playback
   await new Promise((resolve) => {
     const ok = () => resolve();
-    video.addEventListener('canplay', ok, { once: true });
     video.addEventListener('loadedmetadata', ok, { once: true });
+    video.addEventListener('canplay', ok, { once: true });
   }).catch(() => {});
-  await video.play().catch(() => {});
+  await video.play().catch(() => {}); // some browsers gate autoplay; we guard with first-frame wait below
   await waitForVideoDimensions(video);
 
+  // *** NEW: ensure a *real* decoded frame exists; otherwise VideoTexture can render black ***
+  try {
+    await waitForFirstFrame(video, 4000);
+  } catch {
+    // If the mp4 won't produce a frame in time, abandon video and fall back
+    video.pause();
+    // Try image candidates; if none exist, we'll drop to procedural below
+    const pics = ['reflection.jpg','reflection.jpeg','reflection.png','reflection.webp'];
+    for (const name of pics) {
+      // eslint-disable-next-line no-await-in-loop
+      if (await exists(name)) { await applyReflectionFromImage(name); return false; }
+    }
+    // Procedural fallback so background + reflections are visibly non‑black
+    envBackgroundTex = makeProceduralEquirect();
+    await applyEnvFromTexture(envBackgroundTex);
+    bindEnvironmentToMaterials();
+    console.info('[reflection] Video produced no frame; using procedural fallback.');
+    return false;
+  }
+
+  // Build the VideoTexture (tuned for env/P MREM)
   const vtex = new THREE.VideoTexture(video);
   vtex.colorSpace = THREE.SRGBColorSpace;
   vtex.needsUpdate = true;
   vtex.mapping = THREE.EquirectangularReflectionMapping; // sky + PMREM input
+  vtex.minFilter = THREE.LinearFilter;
+  vtex.magFilter = THREE.LinearFilter;
+  vtex.generateMipmaps = false;
+  vtex.wrapS = THREE.ClampToEdgeWrapping;
+  vtex.wrapT = THREE.ClampToEdgeWrapping;
+
   envBackgroundTex = vtex; // raw video equirect for background
 
   if (reflectionTex && reflectionTex.isTexture) reflectionTex.dispose();
@@ -1185,6 +1247,9 @@ async function applyReflectionFromVideo(url) {
   reflectionVideo = video;
 
   await applyEnvFromTexture(reflectionTex);
+  bindEnvironmentToMaterials();
+  console.info('[reflection] Loaded reflection.mp4 (frames active)');
+  return true;
 }
 
 // Procedural equirect fallback — ensures visible reflections + visible BG even without files.
@@ -1195,10 +1260,10 @@ function makeProceduralEquirect(w = 1024, h = 512) {
 
   // Sky/ground gradient
   const g = ctx.createLinearGradient(0, 0, 0, h);
-  g.addColorStop(0.00, '#a9b7c6'); // sky light
-  g.addColorStop(0.45, '#2a3440'); // horizon
-  g.addColorStop(0.55, '#1b2026'); // near horizon
-  g.addColorStop(1.00, '#0f1216'); // ground
+  g.addColorStop(0.00, '#a9b7c6');
+  g.addColorStop(0.45, '#2a3440');
+  g.addColorStop(0.55, '#1b2026');
+  g.addColorStop(1.00, '#0f1216');
   ctx.fillStyle = g;
   ctx.fillRect(0, 0, w, h);
 
@@ -1237,8 +1302,9 @@ async function loadReflectionAuto(logOn = false) {
   try {
     envBackgroundTex = null; // reset; will be set if we find an equirect
     if (await exists('reflection.mp4')) {
-      await applyReflectionFromVideo('reflection.mp4');
-      if (logOn) console.info('[reflection] Loaded reflection.mp4');
+      const ok = await applyReflectionFromVideo('reflection.mp4');
+      if (ok) { if (logOn) console.info('[reflection] Loaded reflection.mp4'); return; }
+      // if not ok, the function already fell back
       return;
     }
     const candidates = ['reflection.jpg', 'reflection.jpeg', 'reflection.png', 'reflection.webp'];
