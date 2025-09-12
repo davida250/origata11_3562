@@ -1,6 +1,7 @@
+// :contentReference[oaicite:1]{index=1}
 // Origata — Brownian polygon surface + echo trails + luma‑preserving RGB + Presets
-// Reflection: explicit envMap binding + PMREM/video/image envs, with raw-equirect sky toggle
-// Black‑screen hardening: seeded triangles + always-valid normals + never 0-face draw.  :contentReference[oaicite:1]{index=1}
+// Reflection: explicit envMap binding + PMREM/video/image envs + robust background toggle.
+// Also adds a procedural equirect fallback so "Show Env Background" always displays something.
 
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
@@ -50,13 +51,13 @@ let reflectionVideo = null;  // HTMLVideoElement when mp4 is used
 let reflectionTex   = null;  // THREE.VideoTexture or THREE.Texture
 let lastVideoPmrem  = 0;
 
-// Raw equirect texture for sky toggle (PMREM is lighting-only, not displayable as sky)
+// Raw equirect texture for sky toggle (PMREM is lighting-only, so keep this for background)
 let envBackgroundTex = null;
 
 // Track materials that need explicit envMap rebinding
 const reflectiveMaterials = [];
 
-// ---------- overlay shader (unchanged look) ----------
+// ---------- overlay shader (keeps your original look) ----------
 function injectOverlay(material) {
   const uniforms = {
     uTime:         { value: 0 },
@@ -304,7 +305,6 @@ class BrownianSurface {
     }
   }
 
-  // k‑NN seeding; if makeCliques, also connect the two nearest neighbors together
   _seedInitialGraph(k = 4, makeCliques = true) {
     const N = this.N, P = this.pos, S = this.state;
     for (let i = 0; i < N; i++) {
@@ -373,7 +373,6 @@ class BrownianSurface {
     this.geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
     this.geometry.setAttribute('normal',   new THREE.BufferAttribute(normals,   3));
     this.geometry.setIndex(new THREE.BufferAttribute(indices, 1));
-    // compute normals immediately so overlay + PBR aren't black
     if (indices.length > 0) this.geometry.computeVertexNormals();
     this.geometry.computeBoundingSphere();
 
@@ -688,8 +687,8 @@ const params = {
   chrome: () => {
     params.reflWorkflow = 'metal';
     params.reflFlatShading = true;
-    params.reflEnvIntensity = 2.2;
-    params.reflRoughness = 0.04;
+    params.reflEnvIntensity = 2.4;
+    params.reflRoughness = 0.03;
     params.reflMetalness = 1.0;
     params.reflMetalColor = '#ffffff';
     const u = surface.mesh.material.userData._overlayUniforms; if (u) u.uBandStrength.value = 0.18;
@@ -700,8 +699,8 @@ const params = {
   glass: () => {
     params.reflWorkflow = 'dielectric';
     params.reflFlatShading = false;
-    params.reflEnvIntensity = 1.8;
-    params.reflRoughness = 0.02;
+    params.reflEnvIntensity = 1.9;
+    params.reflRoughness = 0.04;
     params.reflIOR = 1.5;
     params.reflSpecularIntensity = 1.0;
     const u = surface.mesh.material.userData._overlayUniforms; if (u) u.uBandStrength.value = 0.10;
@@ -729,7 +728,7 @@ const surface = new BrownianSurface({
   breakDist: params.breakDist
 });
 
-// --- Reflection material sync + env binding ---
+// === Reflection helpers ===
 function bindEnvironmentToMaterials() {
   const env = scene.environment || null;
   reflectiveMaterials.forEach((m) => {
@@ -738,7 +737,7 @@ function bindEnvironmentToMaterials() {
   });
   // Show the *raw* equirect texture as a sky when requested; PMREM is lighting-only
   if (params.reflShowBackground) {
-    scene.background = envBackgroundTex || env || new THREE.Color(0x000000);
+    scene.background = envBackgroundTex || scene.environment || new THREE.Color(0x000000);
   } else {
     scene.background = new THREE.Color(0x000000);
   }
@@ -756,7 +755,7 @@ function syncMaterialFromParams() {
   if (params.reflWorkflow === 'metal') {
     mat.metalness = THREE.MathUtils.clamp(params.reflMetalness, 0, 1);
     mat.color.set(params.reflMetalColor);
-    mat.ior               = 1.5; // little effect on true metals
+    mat.ior               = 1.5;
     mat.specularIntensity = 1.0;
   } else {
     mat.metalness = 0.0;
@@ -1071,10 +1070,11 @@ function applyPreset(p) {
 }
 loadPresetsFile();
 
-// ---------- Reflection map loader (mp4 or image) with PMREM, guarded ----------
+// ---------- Reflection map loader (mp4 or image) with PMREM ----------
 async function exists(url) {
-  try { const r = await fetch(url, { method: 'HEAD', cache: 'no-store' }); return r.ok; }
-  catch { return false; }
+  try { const r = await fetch(url, { method: 'HEAD', cache: 'no-store' }); if (r.ok) return true; } catch {}
+  try { const r2 = await fetch(url, { method: 'GET', cache: 'no-store' }); return r2.ok; } catch {}
+  return false;
 }
 function disposeActiveEnvRT(keepDefault = true) {
   if (activeEnvRT && activeEnvRT !== defaultEnvRT) {
@@ -1143,7 +1143,7 @@ async function applyEnvFromTexture(tex) {
   tex.mapping = THREE.EquirectangularReflectionMapping;
   const rt = await makePMREMOrNull(tex);
   if (rt) return setSceneEnvFromPMREM(rt);
-  // Fallback to raw equirectangular (no crash; roughness less correct)
+  // Fallback to raw equirectangular
   return setSceneEnvRaw(tex);
 }
 async function applyReflectionFromImage(url) {
@@ -1153,7 +1153,7 @@ async function applyReflectionFromImage(url) {
   });
   tex.colorSpace = THREE.SRGBColorSpace;
   tex.mapping = THREE.EquirectangularReflectionMapping; // sky + PMREM input
-  envBackgroundTex = tex; // keep raw equirect for "Show Env Background"
+  envBackgroundTex = tex; // raw equirect for "Show Env Background"
   if (reflectionTex && reflectionTex.isTexture) reflectionTex.dispose();
   reflectionTex = tex;
   await applyEnvFromTexture(reflectionTex);
@@ -1186,6 +1186,53 @@ async function applyReflectionFromVideo(url) {
 
   await applyEnvFromTexture(reflectionTex);
 }
+
+// Procedural equirect fallback — ensures visible reflections + visible BG even without files.
+function makeProceduralEquirect(w = 1024, h = 512) {
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  const ctx = c.getContext('2d');
+
+  // Sky/ground gradient
+  const g = ctx.createLinearGradient(0, 0, 0, h);
+  g.addColorStop(0.00, '#a9b7c6'); // sky light
+  g.addColorStop(0.45, '#2a3440'); // horizon
+  g.addColorStop(0.55, '#1b2026'); // near horizon
+  g.addColorStop(1.00, '#0f1216'); // ground
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, w, h);
+
+  // Horizon bright strip
+  ctx.fillStyle = 'rgba(255,255,255,0.18)';
+  ctx.fillRect(0, h*0.48, w, h*0.04);
+
+  // Vertical light bars -> strong chrome highlights
+  ctx.globalAlpha = 0.18;
+  for (let i = 0; i < 12; i++) {
+    const x = ((i + 0.5) / 12) * w;
+    const barW = (i % 3 === 0) ? 10 : 6;
+    ctx.fillStyle = 'white';
+    ctx.fillRect(x - barW/2, 0, barW, h);
+  }
+  ctx.globalAlpha = 1.0;
+
+  // Blocks/windows
+  ctx.fillStyle = 'rgba(240,240,255,0.12)';
+  for (let i = 0; i < 30; i++) {
+    const x = Math.random() * w;
+    const y = (0.55 + 0.4 * Math.random()) * h;
+    const bw = 6 + Math.random() * 30;
+    const bh = 3 + Math.random() * 12;
+    ctx.fillRect(x, y, bw, bh);
+  }
+
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.mapping = THREE.EquirectangularReflectionMapping;
+  tex.needsUpdate = true;
+  return tex;
+}
+
 async function loadReflectionAuto(logOn = false) {
   try {
     envBackgroundTex = null; // reset; will be set if we find an equirect
@@ -1202,8 +1249,11 @@ async function loadReflectionAuto(logOn = false) {
         return;
       }
     }
-    if (logOn) console.info('[reflection] No reflection.* found, using RoomEnvironment.');
-    bindEnvironmentToMaterials(); // still bind default env
+    // No files? Use procedural equirect fallback
+    envBackgroundTex = makeProceduralEquirect();
+    await applyEnvFromTexture(envBackgroundTex);
+    if (logOn) console.info('[reflection] Using procedural fallback environment.');
+    bindEnvironmentToMaterials();
   } catch (e) {
     if (logOn) console.warn('[reflection] Load error:', e);
   }
