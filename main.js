@@ -1,6 +1,6 @@
 // Origata — Brownian polygon surface + echo trails + luma‑preserving RGB + Presets
 // Reflection: full PBR controls + PMREM image/video envs with robust guards
-// Black‑screen hardening: clique‑seeded graph at t=0 → guaranteed triangles.
+// Black‑screen hardening: seeded triangles + always-valid normals + never 0-face draw.  :contentReference[oaicite:1]{index=1}
 
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
@@ -39,18 +39,17 @@ controls.dampingFactor = 0.06;
 controls.minDistance = 2.0;
 controls.maxDistance = 9.0;
 
-// Environment (default RoomEnvironment → may be replaced by reflection file)
+// Default environment (RoomEnvironment → can be replaced by reflection.*)
 const pmrem = new THREE.PMREMGenerator(renderer);
 const defaultEnvRT = pmrem.fromScene(new RoomEnvironment(), 0.04);
 scene.environment = defaultEnvRT.texture;
 
-// active environment trackers
-let activeEnvRT = defaultEnvRT;  // WebGLRenderTarget from PMREM (if any)
-let reflectionVideo = null;      // HTMLVideoElement when using mp4
-let reflectionTex = null;        // THREE.VideoTexture or THREE.Texture
-let lastVideoPmrem = 0;
+let activeEnvRT = defaultEnvRT;
+let reflectionVideo = null;  // HTMLVideoElement when mp4 is used
+let reflectionTex   = null;  // THREE.VideoTexture or THREE.Texture
+let lastVideoPmrem  = 0;
 
-// ---------- overlay shader (your original look preserved) ----------
+// ---------- overlay shader (unchanged look) ----------
 function injectOverlay(material) {
   const uniforms = {
     uTime:         { value: 0 },
@@ -180,7 +179,7 @@ function injectOverlay(material) {
   material.needsUpdate = true;
 }
 
-// ---------------- Brownian polygon surface (faces only) ----------------
+// ---------------- Brownian polygon surface (faces only; no lines/points) ----------------
 class BrownianSurface {
   constructor(opts) {
     this.params = { ...opts };
@@ -239,7 +238,7 @@ class BrownianSurface {
     this._initAnchorsFromSurface(this.surfaceType, this.surfaceJitter);
 
     // Seed initial connectivity with clique closure so triangles exist at frame 0
-    this._seedInitialGraph(4, true); // 4-NN + close the 2 nearest into a clique
+    this._seedInitialGraph(4, true);
     const tris0 = this._computeTriangles();
     this._rebuildGeometry(tris0);
   }
@@ -298,7 +297,7 @@ class BrownianSurface {
     }
   }
 
-  // k‑NN seeding; if makeCliques, connect the two nearest neighbors together
+  // k‑NN seeding; if makeCliques, also connect the two nearest neighbors together
   _seedInitialGraph(k = 4, makeCliques = true) {
     const N = this.N, P = this.pos, S = this.state;
     for (let i = 0; i < N; i++) {
@@ -368,6 +367,8 @@ class BrownianSurface {
     this.geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
     this.geometry.setAttribute('normal',   new THREE.BufferAttribute(normals,   3));
     this.geometry.setIndex(new THREE.BufferAttribute(indices, 1));
+    // Critical: compute normals immediately so overlay + PBR aren't black
+    if (indices.length > 0) this.geometry.computeVertexNormals();
     this.geometry.computeBoundingSphere();
 
     this.mesh.geometry = this.geometry;
@@ -376,14 +377,15 @@ class BrownianSurface {
   _updatePositionsAndNormals() {
     const posAttr = this.geometry.getAttribute('position');
     if (!posAttr) return;
-
     for (let i = 0; i < this.N; i++) {
       const pi = i * 3;
       posAttr.setXYZ(i, this.pos[pi+0], this.pos[pi+1], this.pos[pi+2]);
     }
     posAttr.needsUpdate = true;
 
-    if (!this.material.flatShading) {
+    // Always recompute normals so vWorldNormal (overlay) is valid even with flatShading
+    const idx = this.geometry.getIndex();
+    if (idx && idx.count > 0) {
       this.geometry.computeVertexNormals();
       const nrmAttr = this.geometry.getAttribute('normal');
       if (nrmAttr) nrmAttr.needsUpdate = true;
@@ -444,23 +446,26 @@ class BrownianSurface {
     // Triangles = 3‑cliques
     let tris = this._computeTriangles();
 
-    // Rebuild or update indices
-    const idxAttr = this.geometry.getIndex();
-    if (!idxAttr || idxAttr.count !== tris.length * 3) {
-      this._rebuildGeometry(tris);
+    // Never render 0 faces: keep previous triangles if empty this step
+    if (tris.length === 0) {
+      this._updatePositionsAndNormals();
     } else {
-      for (let t = 0; t < tris.length; t++) {
-        const [a,b,c] = tris[t];
-        const base = t * 3;
-        idxAttr.setX(base + 0, a);
-        idxAttr.setX(base + 1, b);
-        idxAttr.setX(base + 2, c);
+      const idxAttr = this.geometry.getIndex();
+      if (!idxAttr || idxAttr.count !== tris.length * 3) {
+        this._rebuildGeometry(tris);
+      } else {
+        for (let t = 0; t < tris.length; t++) {
+          const [a,b,c] = tris[t];
+          const base = t * 3;
+          idxAttr.setX(base + 0, a);
+          idxAttr.setX(base + 1, b);
+          idxAttr.setX(base + 2, c);
+        }
+        idxAttr.needsUpdate = true;
+        this.tris = tris;
       }
-      idxAttr.needsUpdate = true;
-      this.tris = tris;
+      this._updatePositionsAndNormals();
     }
-
-    if (tris.length > 0) this._updatePositionsAndNormals();
 
     // Overlay time + presentation rotation
     const uniforms = this.material.userData._overlayUniforms;
@@ -626,11 +631,11 @@ uiHost.appendChild(gui.domElement);
 const params = {
   // Brownian surface
   primitive:     'sphere',  // 'sphere' | 'cube' | 'torus'
-  surfaceJitter: 0.12,
+  surfaceJitter: 0.12,      // ± offset along surface normal
   count:         36,
   amp:           0.85,
   freq:          0.9,
-  connectDist:   1.05,  // slightly higher default to ensure initial faces
+  connectDist:   1.05,
   breakDist:     1.30,
 
   // Animation
@@ -707,7 +712,7 @@ function syncMaterialFromParams() {
   if (params.reflWorkflow === 'metal') {
     mat.metalness = THREE.MathUtils.clamp(params.reflMetalness, 0, 1);
     mat.color.set(params.reflMetalColor);
-    mat.ior               = 1.5; // no real effect on true metals
+    mat.ior               = 1.5; // little effect on true metals
     mat.specularIntensity = 1.0;
   } else {
     mat.metalness = 0.0;
@@ -744,7 +749,7 @@ let breakCtrl;
 fSys.add(params, 'count', 4, 200, 1).name('Vertices').onFinishChange(v => surface.setCount(v));
 fSys.add(params, 'amp', 0.0, 2.0, 0.001).name('Amplitude').onChange(v => surface.params.amp = v);
 fSys.add(params, 'freq', 0.0, 3.0, 0.001).name('Frequency').onChange(v => surface.params.freq = v);
-fSys.add(params, 'connectDist', 0.05, 3.0, 0.001).name('Connect (≤)').onChange(v => {
+const connectCtrl = fSys.add(params, 'connectDist', 0.05, 3.0, 0.001).name('Connect (≤)').onChange(v => {
   surface.params.connectDist = v;
   if (params.breakDist < v) {
     params.breakDist = v;
@@ -797,10 +802,10 @@ fRGB.add(params, 'rgbPulseHz', 0.0, 5.0, 0.001).name('Pulse (Hz)');
 // === Reflection (PBR) ===
 const fRefl = gui.addFolder('Reflection');
 const reflCtrls = { common: [], dielectric: [], metal: [] };
-reflCtrls.common.push(fRefl.add(params, 'reflWorkflow', {
+const cWorkflow = fRefl.add(params, 'reflWorkflow', {
   'Dielectric (non‑metal)': 'dielectric',
   'Metal (PBR)': 'metal'
-}).name('Workflow').onChange(() => { syncMaterialFromParams(); updateReflVisibility(); }));
+}).name('Workflow').onChange(() => { syncMaterialFromParams(); updateReflVisibility(); });
 
 reflCtrls.common.push(fRefl.add(params, 'reflFlatShading').name('Origami (Flat)').onChange(syncMaterialFromParams));
 reflCtrls.common.push(fRefl.add(params, 'reflEnvIntensity', 0.0, 3.0, 0.01).name('Env Intensity').onChange(syncMaterialFromParams));
@@ -1040,16 +1045,14 @@ function setSceneEnvRaw(tex) {
   if (!tex) return false;
   scene.environment = tex;
   disposeActiveEnvRT(); // drop any previous PMREM to avoid leaks
-  activeEnvRT = defaultEnvRT; // keep default handle (not disposed)
+  activeEnvRT = defaultEnvRT; // keep default handle
   return true;
 }
 async function waitForVideoDimensions(video) {
   if (video.videoWidth > 0 && video.videoHeight > 0) return;
   await new Promise((resolve) => {
     const check = () => {
-      if (video.videoWidth > 0 && video.videoHeight > 0) {
-        cleanup(); resolve();
-      }
+      if (video.videoWidth > 0 && video.videoHeight > 0) { cleanup(); resolve(); }
     };
     const cleanup = () => {
       video.removeEventListener('loadedmetadata', check);
@@ -1059,7 +1062,6 @@ async function waitForVideoDimensions(video) {
     video.addEventListener('loadedmetadata', check);
     video.addEventListener('loadeddata', check);
     video.addEventListener('resize', check);
-    // call once in case it's already ready
     check();
   });
 }
@@ -1086,7 +1088,7 @@ async function applyEnvFromTexture(tex) {
   tex.mapping = THREE.EquirectangularReflectionMapping;
   const rt = await makePMREMOrNull(tex);
   if (rt) return setSceneEnvFromPMREM(rt);
-  // Fallback to raw equirectangular (no crash; roughness less accurate)
+  // Fallback to raw equirectangular (no crash; roughness less correct)
   return setSceneEnvRaw(tex);
 }
 async function applyReflectionFromImage(url) {
@@ -1107,12 +1109,11 @@ async function applyReflectionFromVideo(url) {
   video.muted = true;
   video.playsInline = true;
   video.preload = 'auto';
-  await new Promise((resolve, reject) => {
-    const onErr = () => reject(new Error('Video load error'));
-    video.addEventListener('error', onErr, { once: true });
-    video.addEventListener('canplay', () => resolve(), { once: true });
+  await new Promise((resolve) => {
+    const ok = () => resolve();
+    video.addEventListener('canplay', ok, { once: true });
+    video.addEventListener('loadedmetadata', ok, { once: true });
   }).catch(() => {});
-  // Ensure we have real dimensions before PMREM
   await video.play().catch(() => {});
   await waitForVideoDimensions(video);
 
@@ -1196,10 +1197,7 @@ function animate() {
     const sec = now / 1000;
     if (sec - lastVideoPmrem >= (1 / params.reflVideoUpdateHz)) {
       lastVideoPmrem = sec;
-      // Rebuild PMREM from the live video texture (guarded)
-      makePMREMOrNull(reflectionTex).then(rt => {
-        if (rt) setSceneEnvFromPMREM(rt);
-      });
+      makePMREMOrNull(reflectionTex).then(rt => { if (rt) setSceneEnvFromPMREM(rt); });
     }
   }
 
