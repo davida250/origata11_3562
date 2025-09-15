@@ -57,7 +57,9 @@ const reflectiveMaterials = [];
 // --- NEW: image cycling state ---
 let reflCycleList  = [];
 let reflCycleIdx   = 0;
-let reflCycleTimer = null;
+// replace timer with an abort token so cycles run serialized (no overlap → no flicker)
+let reflCycleAbort = 0;
+const _sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 // ---------- overlay shader (keeps your original look) ----------
 function injectOverlay(material) {
@@ -872,8 +874,8 @@ reflCtrls.common.push(fRefl.add(params, 'reflVideoUpdateHz', 0.0, 12.0, 0.1).nam
 reflCtrls.common.push(fRefl.add(params, 'reflShowBackground').name('Show Env Background').onChange(bindEnvironmentToMaterials));
 
 
-// NEW: GUI for cycling + tiling
-fRefl.add(params, 'reflCycleSeconds', 0.0, 60.0, 0.1).name('Cycle Interval (s)').onChange(updateReflectionCycle);
+// NEW: GUI for cycling + tiling  (min 1s; 0 is only possible via preset/JSON to disable)
+fRefl.add(params, 'reflCycleSeconds', 1.0, 60.0, 0.1).name('Cycle Interval (s)').onChange(updateReflectionCycle);
 fRefl.add(params, 'reflBgTile').name('Tile Background').onChange(updateBgTiling);
 fRefl.add(params, 'reflBgRepeatU', 1.0, 16.0, 0.1).name('BG Repeat U').onChange(updateBgTiling);
 fRefl.add(params, 'reflBgRepeatV', 1.0, 16.0, 0.1).name('BG Repeat V').onChange(updateBgTiling);
@@ -925,20 +927,29 @@ async function buildReflectionCycleList() {
   return list;
 }
 
+// Serialized, await-driven loop. No overlapping loads/PMREM → no flicker on image 3.
 async function updateReflectionCycle() {
-  if (reflCycleTimer) { clearInterval(reflCycleTimer); reflCycleTimer = null; }
-  if (params.reflCycleSeconds > 0) {
-    if (!reflCycleList || reflCycleList.length === 0) {
-      reflCycleList = await buildReflectionCycleList();
-    }
-    if (reflCycleList.length > 0) {
-      reflCycleIdx = 0;
-      await applyReflectionFromImage(reflCycleList[reflCycleIdx]);
-      reflCycleTimer = setInterval(() => {
-        reflCycleIdx = (reflCycleIdx + 1) % reflCycleList.length;
-        applyReflectionFromImage(reflCycleList[reflCycleIdx]);
-      }, Math.max(0.2, params.reflCycleSeconds) * 1000);
-    }
+  // bump token to cancel any in-flight loop (without races)
+  const token = ++reflCycleAbort;
+  const sec = params.reflCycleSeconds;
+  // only run when ≥ 1s (0 still means OFF)
+  if (!(sec >= 1)) return;
+
+  if (!reflCycleList || reflCycleList.length === 0) {
+    reflCycleList = await buildReflectionCycleList();
+  }
+  if (reflCycleList.length === 0) return;
+
+  // ensure current index is valid; don't reset unnecessarily to avoid stutter on tweaks
+  if (reflCycleIdx >= reflCycleList.length) reflCycleIdx = 0;
+  await applyReflectionFromImage(reflCycleList[reflCycleIdx]);
+
+  // main loop — strictly serialize: wait → advance → await load → repeat
+  while (token === reflCycleAbort && params.reflCycleSeconds >= 1) {
+    await _sleep(Math.max(1000, params.reflCycleSeconds * 1000)); // hard min 1s
+    if (token !== reflCycleAbort) break;
+    reflCycleIdx = (reflCycleIdx + 1) % reflCycleList.length;
+    await applyReflectionFromImage(reflCycleList[reflCycleIdx]);
   }
 }
 
