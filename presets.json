@@ -51,6 +51,8 @@
       },
       "reflection": {
         "workflow": "dielectric",
+        "bgUV": 1.0,
+        "imageIntervalSec": 3.0,        
         "flatShading": true,
         "envIntensity": 1.6,
         "roughness": 0.26,
@@ -62,11 +64,7 @@
         "clearcoat": 0.0,
         "clearcoatRoughness": 0.2,
         "videoPmremHz": 0.0,
-        "showBackground": false,
-        "bgTile": false,
-        "bgRepeatU": 1,
-        "bgRepeatV": 1,
-        "cycleSeconds": 10
+        "showBackground": false
       },
       "view": {
         "exposure": 1.15
@@ -123,6 +121,8 @@
       },
       "reflection": {
         "workflow": "metal",
+        "bgUV": 1.0,
+        "imageIntervalSec": 3.0,        
         "flatShading": true,
         "envIntensity": 2.2,
         "roughness": 0.06,
@@ -134,11 +134,7 @@
         "clearcoat": 0.2,
         "clearcoatRoughness": 0.35,
         "videoPmremHz": 0.0,
-        "showBackground": true,
-        "bgTile": false,
-        "bgRepeatU": 1,
-        "bgRepeatV": 1,
-        "cycleSeconds": 10
+        "showBackground": true
       },
       "view": {
         "exposure": 1.10
