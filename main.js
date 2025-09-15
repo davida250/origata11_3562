@@ -59,6 +59,8 @@ let reflCycleList  = [];
 let reflCycleIdx   = 0;
 // replace timer with an abort token so cycles run serialized (no overlap → no flicker)
 let reflCycleAbort = 0;
+
+let reflCycleTextures = null; // preloaded textures used by the cycle
 const _sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 // ---------- overlay shader (keeps your original look) ----------
@@ -691,7 +693,7 @@ const params = {
   reflBgTile: false,
   reflBgRepeatU: 1.0,
   reflBgRepeatV: 1.0,
-  reflCycleSeconds: 0.0,
+  reflCycleSeconds: 10.0,
 
   // Quick demo presets for reflection
   chrome: () => {
@@ -915,6 +917,16 @@ function updateBgTiling() {
   const v = params.reflBgTile ? Math.max(1, params.reflBgRepeatV) : 1;
   if (envBackgroundTex.repeat && envBackgroundTex.repeat.set) envBackgroundTex.repeat.set(u, v);
   envBackgroundTex.needsUpdate = true;
+
+  // NEW: Make reflections honor tiling as well by regenerating PMREM
+  // from the raw equirect texture currently in use.
+  // (Background shows the raw texture; reflections come from PMREM.)
+  if (reflectionTex === envBackgroundTex) {
+    makePMREMOrNull(envBackgroundTex).then(rt => {
+      if (rt) setSceneEnvFromPMREM(rt);
+    });
+  }
+
 }
 
 async function buildReflectionCycleList() {
@@ -927,29 +939,68 @@ async function buildReflectionCycleList() {
   return list;
 }
 
+// NEW: preload all cycle textures up front to avoid first-swap stalls
+async function preloadReflectionCycleTextures() {
+  if (!reflCycleList || reflCycleList.length === 0) return [];
+  const loader = new THREE.TextureLoader();
+  const loads = reflCycleList.map((url) => new Promise((resolve) => {
+    loader.load(
+      url,
+      (tex) => {
+        tex.colorSpace = THREE.SRGBColorSpace;
+        tex.mapping = THREE.EquirectangularReflectionMapping;
+        resolve(tex);
+      },
+      undefined,
+      () => resolve(null)
+    );
+  }));
+  return (await Promise.all(loads)).filter(Boolean);
+}
+
+// NEW: apply a preloaded texture (no disposal of cached textures)
+async function applyReflectionFromPreloadedTexture(tex) {
+  if (!tex) return;
+  envBackgroundTex = tex;
+  reflectionVideo  = null;
+  reflectionTex    = tex;
+  updateBgTiling(); // ensure wrap/repeat and regenerate PMREM accordingly
+  await applyEnvFromTexture(tex);
+  bindEnvironmentToMaterials();
+}
+
+
 // Serialized, await-driven loop. No overlapping loads/PMREM → no flicker on image 3.
 async function updateReflectionCycle() {
   // bump token to cancel any in-flight loop (without races)
   const token = ++reflCycleAbort;
   const sec = params.reflCycleSeconds;
-  // only run when ≥ 1s (0 still means OFF)
-  if (!(sec >= 1)) return;
 
   if (!reflCycleList || reflCycleList.length === 0) {
     reflCycleList = await buildReflectionCycleList();
   }
   if (reflCycleList.length === 0) return;
 
-  // ensure current index is valid; don't reset unnecessarily to avoid stutter on tweaks
-  if (reflCycleIdx >= reflCycleList.length) reflCycleIdx = 0;
-  await applyReflectionFromImage(reflCycleList[reflCycleIdx]);
+  // Preload all textures once (or when the list changes)
+  if (!reflCycleTextures || reflCycleTextures.length !== reflCycleList.length) {
+    reflCycleTextures = await preloadReflectionCycleTextures();
+  }
+  if (reflCycleTextures.length === 0) return;
+
+  // Ensure current index is valid; apply the first image immediately
+  // even if cycling is "off" (sec < 1).
+  if (reflCycleIdx >= reflCycleTextures.length) reflCycleIdx = 0;
+  await applyReflectionFromPreloadedTexture(reflCycleTextures[reflCycleIdx]);
+
+  // only run the timed loop when ≥ 1s (0 still means OFF)
+  if (!(sec >= 1)) return;
 
   // main loop — strictly serialize: wait → advance → await load → repeat
   while (token === reflCycleAbort && params.reflCycleSeconds >= 1) {
     await _sleep(Math.max(1000, params.reflCycleSeconds * 1000)); // hard min 1s
     if (token !== reflCycleAbort) break;
-    reflCycleIdx = (reflCycleIdx + 1) % reflCycleList.length;
-    await applyReflectionFromImage(reflCycleList[reflCycleIdx]);
+    reflCycleIdx = (reflCycleIdx + 1) % reflCycleTextures.length;
+    await applyReflectionFromPreloadedTexture(reflCycleTextures[reflCycleIdx]);
   }
 }
 
