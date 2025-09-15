@@ -54,17 +54,19 @@ let envBackgroundTex = null;
 // Track materials that need explicit envMap rebinding
 const reflectiveMaterials = [];
 
-// --- NEW: image cycling state ---
-let reflCycleList  = [];
-let reflCycleIdx   = 0;
-// replace timer with an abort token so cycles run serialized (no overlap → no flicker)
-let reflCycleAbort = 0;
+// --- BG skydome for tiling + image sequence state ---
+let bgMesh = null;
+const REFLECTION_SEQUENCE_FILES = ['reflection_1.jpg','reflection_2.jpg','reflection_3.jpg'];
+let reflectionImageTextures = [];
+let reflectionCycleIndex = -1;
+let reflectionNextSwapSec = 0;
 
-let reflCycleTextures = null; // preloaded textures used by the cycle
-let _tilingEnvRefreshInProgress = false; // guard to avoid re-entrant PMREM updates
-
-let reflCycleTextures = null; // preloaded textures used by the cycle
-const _sleep = (ms) => new Promise(r => setTimeout(r, ms));
+function ensureBgMesh() {
+  if (bgMesh) return bgMesh;
+  const geo = new THREE.SphereGeometry(50, 64, 32);
+  const mat = new THREE.MeshBasicMaterial({ map: null, side: THREE.BackSide, depthTest: false, depthWrite: false });
+  bgMesh = new THREE.Mesh(geo, mat); bgMesh.renderOrder = -9999; bgMesh.visible = false; scene.add(bgMesh); return bgMesh;
+}
 
 // ---------- overlay shader (keeps your original look) ----------
 function injectOverlay(material) {
@@ -692,11 +694,8 @@ const params = {
   reflVideoUpdateHz: 0.0,       // PMREM refresh for video envs
   reflShowBackground: false,    // show raw equirect env as background (if present)
 
-  // NEW: background tiling + image cycling
-  reflBgTile: false,
-  reflBgRepeatU: 1.0,
-  reflBgRepeatV: 1.0,
-  reflCycleSeconds: 10.0,
+  reflBgUV: 1.0,                // BG UV tiling (U=V), clamped ≥ 0.001
+  reflImageIntervalSec: 3.0,    // cycle interval for reflection_*.jpg
 
   // Quick demo presets for reflection
   chrome: () => {
@@ -750,22 +749,33 @@ function bindEnvironmentToMaterials() {
     m.envMap = env;           // explicit binding so IBL is obvious
     m.needsUpdate = true;
   });
-  // Show the *raw* equirect texture as a sky when requested; PMREM is lighting-only
-  if (params.reflShowBackground) {
-    // Enforce tiling on the visible background without re‑PMREMing here
-    updateBgTiling(false);
-    try {
-      scene.background = (envBackgroundTex && envBackgroundTex.isTexture)
-        ? envBackgroundTex
-        : new THREE.Color(0x000000);
-    } catch (e) {
-      console.warn('[bg] Could not set background:', e);
-      scene.background = new THREE.Color(0x000000);
-    }
+
+  // BG as skydome so UV tiling works (PMREM stays for lighting)
+  ensureBgMesh();
+  if (params.reflShowBackground && envBackgroundTex) {
+    bgMesh.visible = true;
+    bgMesh.material.map = envBackgroundTex;
+    updateBgUVRepeat(); // apply current tiling (images only)
+    bgMesh.material.needsUpdate = true;
+    scene.background = new THREE.Color(0x000000); // keep clear color
   } else {
+    if (bgMesh) bgMesh.visible = false;
     scene.background = new THREE.Color(0x000000);
   }
+
 }
+
+function updateBgUVRepeat() {
+  const r = Math.max(0.001, params.reflBgUV || 1.0); // never 0
+  const apply = (tex) => {
+    if (!tex || tex.isVideoTexture) return;
+    tex.wrapS = THREE.RepeatWrapping; tex.wrapT = THREE.RepeatWrapping;
+    if (tex.repeat) tex.repeat.set(r, r); tex.needsUpdate = true;
+  };
+  apply(envBackgroundTex);
+  reflectionImageTextures.forEach(apply);
+}
+
 
 function syncMaterialFromParams() {
   const mat = surface.material;
@@ -885,13 +895,8 @@ reflCtrls.common.push(fRefl.add(params, 'reflClearcoatRoughness', 0.0, 1.0, 0.00
 reflCtrls.common.push(fRefl.add(params, 'reflVideoUpdateHz', 0.0, 12.0, 0.1).name('Video PMREM Hz'));
 reflCtrls.common.push(fRefl.add(params, 'reflShowBackground').name('Show Env Background').onChange(bindEnvironmentToMaterials));
 
-
-// NEW: GUI for cycling + tiling  (min 1s; 0 is only possible via preset/JSON to disable)
-fRefl.add(params, 'reflCycleSeconds', 1.0, 60.0, 0.1).name('Cycle Interval (s)').onChange(updateReflectionCycle);
-fRefl.add(params, 'reflBgTile').name('Tile Background').onChange(() => updateBgTiling());
-fRefl.add(params, 'reflBgRepeatU', 1.0, 16.0, 0.1).name('BG Repeat U').onChange(() => updateBgTiling());
-fRefl.add(params, 'reflBgRepeatV', 1.0, 16.0, 0.1).name('BG Repeat V').onChange(() => updateBgTiling());
- 
+reflCtrls.common.push(fRefl.add(params, 'reflBgUV', 0.1, 8.0, 0.01).name('BG UV Repeat').onChange(updateBgUVRepeat));
+fRefl.add(params, 'reflImageIntervalSec', 0.25, 60.0, 0.05).name('Image Interval (s)');
 
 reflCtrls.dielectric.push(fRefl.add(params, 'reflIOR', 1.0, 2.333, 0.001).name('IOR').onChange(syncMaterialFromParams));
 reflCtrls.dielectric.push(fRefl.add(params, 'reflSpecularIntensity', 0.0, 1.0, 0.001).name('Specular Intensity').onChange(syncMaterialFromParams));
@@ -915,167 +920,6 @@ function updateReflVisibility() {
 }
 syncMaterialFromParams();
 updateReflVisibility();
-
-
-// --- NEW: background tiling + image cycling helpers ---
-function updateBgTiling(refreshEnv = true) {
-  if (!envBackgroundTex || !envBackgroundTex.isTexture) return;
-
-  // Determine if GPU can legally repeat this texture (WebGL1 requires POT).
-  const canRepeat = (() => {
-    const caps = renderer.capabilities;
-    const webgl2 = !!caps.isWebGL2;
-    let w = 0, h = 0;
-    const img = envBackgroundTex.image;
-    if (envBackgroundTex.isVideoTexture) { w = img?.videoWidth || 0; h = img?.videoHeight || 0; }
-    else { w = img?.naturalWidth || img?.width || 0; h = img?.naturalHeight || img?.height || 0; }
-    const isPOT = (w > 0 && h > 0) ? ((w & (w - 1)) === 0 && (h & (h - 1)) === 0) : false;
-    return webgl2 || isPOT;
-  })();
-
-  const wantTile = params.reflBgTile && canRepeat;
-  if (params.reflBgTile && !wantTile) {
-    console.info('[tiling] Background tiling requires WebGL2 or a power‑of‑two texture; falling back to clamp.');
-  }
-
-  const wrap = wantTile ? THREE.RepeatWrapping : THREE.ClampToEdgeWrapping;
-  envBackgroundTex.wrapS = wrap;
-  envBackgroundTex.wrapT = wrap;
-  const u = wantTile ? Math.max(1, params.reflBgRepeatU) : 1;
-  const v = wantTile ? Math.max(1, params.reflBgRepeatV) : 1;
-  if (envBackgroundTex.repeat && envBackgroundTex.repeat.set) envBackgroundTex.repeat.set(u, v);
-  envBackgroundTex.needsUpdate = true;
-
-  // Ensure reflections honor tiling: regenerate PMREM once (guarded).
-  if (refreshEnv && !_tilingEnvRefreshInProgress) {
-    _tilingEnvRefreshInProgress = true;
-    makePMREMOrNull(envBackgroundTex).then(rt => {
-      if (rt) setSceneEnvFromPMREM(rt);
-    }).finally(() => { _tilingEnvRefreshInProgress = false; });
-  }
-
-  // NEW: Make reflections honor tiling as well by regenerating PMREM
-  // from the raw equirect texture currently in use.
-  // (Background shows the raw texture; reflections come from PMREM.)
-  if (reflectionTex === envBackgroundTex) {
-    makePMREMOrNull(envBackgroundTex).then(rt => {
-      if (rt) setSceneEnvFromPMREM(rt);
-    });
-  }
-
-}
-
-async function buildReflectionCycleList() {
-  const names = ['reflection_1.jpg','reflection_2.jpg','reflection_3.jpg'];
-  const list = [];
-  for (const n of names) {
-    // eslint-disable-next-line no-await-in-loop
-    if (await exists(n)) list.push(n);
-  }
-  return list;
-}
-
-// NEW: preload all cycle textures up front to avoid first-swap stalls
-async function preloadReflectionCycleTextures() {
-  if (!reflCycleList || reflCycleList.length === 0) return [];
-  const loader = new THREE.TextureLoader();
-  const loads = reflCycleList.map((url) => new Promise((resolve) => {
-    loader.load(
-      url,
-      (tex) => {
-        tex.colorSpace = THREE.SRGBColorSpace;
-        tex.mapping = THREE.EquirectangularReflectionMapping;
-        resolve(tex);
-      },
-      undefined,
-      () => resolve(null)
-    );
-  }));
-  return (await Promise.all(loads)).filter(Boolean);
-}
-
-// NEW: apply a preloaded texture (no disposal of cached textures)
-async function applyReflectionFromPreloadedTexture(tex) {
-  if (!tex) return;
-  envBackgroundTex = tex;
-  reflectionVideo  = null;
-  reflectionTex    = tex;
-  updateBgTiling(); // ensure wrap/repeat and regenerate PMREM accordingly
-  await applyEnvFromTexture(tex);
-  bindEnvironmentToMaterials();
-}
-
-// Preload cycle textures to avoid first-swap stalls
-async function preloadReflectionCycleTextures() {
-  if (!reflCycleList || reflCycleList.length === 0) return [];
-  const loader = new THREE.TextureLoader();
-  const loads = reflCycleList.map((url) => new Promise((resolve) => {
-    loader.load(
-      url,
-      (tex) => {
-        tex.colorSpace = THREE.SRGBColorSpace;
-        tex.mapping = THREE.EquirectangularReflectionMapping;
-        resolve(tex);
-      },
-      undefined,
-      () => resolve(null)
-    );
-  }));
-  return (await Promise.all(loads)).filter(Boolean);
-}
-
-async function applyReflectionFromPreloadedTexture(tex) {
-  if (!tex) return;
-  envBackgroundTex = tex;
-  reflectionVideo  = null;
-  if (reflectionTex && reflectionTex.isTexture && reflectionTex !== tex) reflectionTex.dispose();
-  reflectionTex = tex;
-  updateBgTiling(false); // set wrapping; PMREM regen happens below
-  await applyEnvFromTexture(reflectionTex);
-  bindEnvironmentToMaterials();
-}
-
-
-// Serialized, await-driven loop. No overlapping loads/PMREM → no flicker on image 3.
-async function updateReflectionCycle() {
-  // bump token to cancel any in-flight loop (without races)
-  const token = ++reflCycleAbort;
-  const sec = params.reflCycleSeconds;
-
-  if (!reflCycleList || reflCycleList.length === 0) {
-    reflCycleList = await buildReflectionCycleList();
-  }
-  if (reflCycleList.length === 0) return;
-
-  // Preload all textures once (or when the list changes)
-  if (!reflCycleTextures || reflCycleTextures.length !== reflCycleList.length) {
-    reflCycleTextures = await preloadReflectionCycleTextures();
-  }
-  if (reflCycleTextures.length === 0) return;
-
-  // Preload once (or when list changes)
-  if (!reflCycleTextures || reflCycleTextures.length !== reflCycleList.length) {
-    reflCycleTextures = await preloadReflectionCycleTextures();
-  }
-  if (reflCycleTextures.length === 0) return;
-
-  // ensure current index is valid; don't reset unnecessarily to avoid stutter on tweaks
-  if (reflCycleIdx >= reflCycleTextures.length) reflCycleIdx = 0;
-
-  // Apply the first frame immediately even if cycling is "off"
-  await applyReflectionFromPreloadedTexture(reflCycleTextures[reflCycleIdx]);
-  // only run the timed loop when ≥ 1s (0 still means OFF)
-  if (!(sec >= 1)) return;
-
-  // main loop — strictly serialize: wait → advance → await load → repeat
-  while (token === reflCycleAbort && params.reflCycleSeconds >= 1) {
-    await _sleep(Math.max(1000, params.reflCycleSeconds * 1000)); // hard min 1s
-    if (token !== reflCycleAbort) break;
-    reflCycleIdx = (reflCycleIdx + 1) % reflCycleTextures.length;
-    await applyReflectionFromPreloadedTexture(reflCycleTextures[reflCycleIdx]);
-  }
-}
-
 
 // View
 const fView = gui.addFolder('View');
@@ -1259,16 +1103,11 @@ function applyPreset(p) {
     if (isFinite(p.reflection.videoPmremHz))       params.reflVideoUpdateHz      = p.reflection.videoPmremHz;
     if (typeof p.reflection.showBackground === 'boolean') params.reflShowBackground = p.reflection.showBackground;
 
-    // NEW: tiling + cycling fields
-    if (typeof p.reflection.bgTile === 'boolean') params.reflBgTile = p.reflection.bgTile;
-    if (isFinite(p.reflection.bgRepeatU)) params.reflBgRepeatU = p.reflection.bgRepeatU;
-    if (isFinite(p.reflection.bgRepeatV)) params.reflBgRepeatV = p.reflection.bgRepeatV;
-    if (isFinite(p.reflection.cycleSeconds)) params.reflCycleSeconds = p.reflection.cycleSeconds;
-
+    if (isFinite(p.reflection.bgUV))               { params.reflBgUV = Math.max(0.001, p.reflection.bgUV); updateBgUVRepeat(); }
+    if (isFinite(p.reflection.imageIntervalSec))   params.reflImageIntervalSec = Math.max(0.25, p.reflection.imageIntervalSec);
+   
     syncMaterialFromParams();
     updateReflVisibility();
-    updateBgTiling();
-    updateReflectionCycle();    
   }
   // View
   if (p.view && isFinite(p.view.exposure)) {
@@ -1393,7 +1232,6 @@ async function applyReflectionFromImage(url) {
   tex.colorSpace = THREE.SRGBColorSpace;
   tex.mapping = THREE.EquirectangularReflectionMapping; // sky + PMREM input
   envBackgroundTex = tex; // raw equirect for "Show Env Background"
-  updateBgTiling(false); // enforce wrapping; PMREM regen will follow
   if (reflectionTex && reflectionTex.isTexture) reflectionTex.dispose();
   reflectionTex = tex;
   await applyEnvFromTexture(reflectionTex);
@@ -1449,7 +1287,6 @@ async function applyReflectionFromVideo(url) {
   vtex.wrapT = THREE.ClampToEdgeWrapping;
 
   envBackgroundTex = vtex; // raw video equirect for background
-  updateBgTiling(false); // enforce wrapping; PMREM regen will follow
 
   if (reflectionTex && reflectionTex.isTexture) reflectionTex.dispose();
   reflectionTex = vtex;
@@ -1459,6 +1296,37 @@ async function applyReflectionFromVideo(url) {
   bindEnvironmentToMaterials();
   console.info('[reflection] Loaded reflection.mp4 (frames active)');
   return true;
+}
+
+
+// Preload a 3-image reflection sequence (if present)
+async function preloadReflectionSequence() {
+  const loader = new THREE.TextureLoader();
+  const list = [];
+  for (const name of REFLECTION_SEQUENCE_FILES) {
+    // eslint-disable-next-line no-await-in-loop
+    if (!(await exists(name))) continue;
+    // eslint-disable-next-line no-await-in-loop
+    const tex = await new Promise((resolve, reject) => loader.load(name, resolve, undefined, reject));
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.mapping = THREE.EquirectangularReflectionMapping;
+    tex.generateMipmaps = true;
+    tex.minFilter = THREE.LinearMipmapLinearFilter;
+    tex.magFilter = THREE.LinearFilter;
+    list.push(tex);
+  }
+  reflectionImageTextures = list;
+  updateBgUVRepeat(); // apply current tiling to all
+  return reflectionImageTextures.length > 0;
+}
+
+async function setReflectionFromPreloadedTex(tex) {
+  if (!tex) return;
+  envBackgroundTex = tex;
+  reflectionTex = tex;
+  reflectionVideo = null;
+  await applyEnvFromTexture(tex);
+  bindEnvironmentToMaterials();
 }
 
 // Procedural equirect fallback — ensures visible reflections + visible BG even without files.
@@ -1510,6 +1378,17 @@ function makeProceduralEquirect(w = 1024, h = 512) {
 async function loadReflectionAuto(logOn = false) {
   try {
     envBackgroundTex = null; // reset; will be set if we find an equirect
+
+    // NEW: prefer a 3-image sequence if available; pre-load and start cycling
+    if (await preloadReflectionSequence()) {
+      reflectionCycleIndex = 0;
+      reflectionNextSwapSec = performance.now()/1000 + Math.max(0.25, params.reflImageIntervalSec);
+      await setReflectionFromPreloadedTex(reflectionImageTextures[0]);
+      if (logOn) console.info('[reflection] Loaded reflection_1/2/3.jpg sequence');
+      return;
+    }
+
+
     if (await exists('reflection.mp4')) {
       const ok = await applyReflectionFromVideo('reflection.mp4');
       if (ok) { if (logOn) console.info('[reflection] Loaded reflection.mp4'); return; }
@@ -1526,9 +1405,6 @@ async function loadReflectionAuto(logOn = false) {
     // No files? Use procedural equirect fallback
     envBackgroundTex = makeProceduralEquirect();
     await applyEnvFromTexture(envBackgroundTex);
-
-  updateBgTiling(false); // enforce wrapping; PMREM regen will follow
-
     if (logOn) console.info('[reflection] Using procedural fallback environment.');
     bindEnvironmentToMaterials();
   } catch (e) {
@@ -1539,10 +1415,6 @@ loadReflectionAuto(true);
 
 // Ensure default env is bound on startup
 bindEnvironmentToMaterials();
-
-
-// NEW: start cycling if enabled
-updateReflectionCycle();
 
 // ---------- loop ----------
 let tPrev = performance.now();
@@ -1586,6 +1458,19 @@ function animate() {
   const rgbAmt = params.rgbAmount + pulse;
   rgbShiftPass.uniforms['angle'].value  = rgbAngle;
   rgbShiftPass.uniforms['amount'].value = rgbAmt;
+
+
+  // Image sequence cycling (reflection_1/2/3.jpg) if preloaded
+  if (reflectionImageTextures.length > 0) {
+    const sec = now / 1000;
+    const interval = Math.max(0.25, params.reflImageIntervalSec || 3.0);
+    if (sec >= reflectionNextSwapSec) {
+      reflectionCycleIndex = (reflectionCycleIndex + 1) % reflectionImageTextures.length;
+      const tex = reflectionImageTextures[reflectionCycleIndex];
+      setReflectionFromPreloadedTex(tex); // async, fire-and-forget
+      reflectionNextSwapSec = sec + interval;
+    }
+  }
 
   // Optional PMREM refresh for video env‑map (only if a PMREM is currently in use)
   if (reflectionVideo && params.reflVideoUpdateHz > 0 && activeEnvRT && activeEnvRT !== defaultEnvRT) {
