@@ -1,4 +1,4 @@
-// Origata v0.48 - Entity FX Inc.
+// Origata v0.52 - Entity FX Inc.
 
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
@@ -811,75 +811,104 @@ const presetsCtl = {
   load: () => { if (presetsCtl.selected in _presets) applyPreset(_presets[presetsCtl.selected]); },
 
   reload: () => loadPresetsFile(),
-  // NEW: Copy the selected preset to clipboard in the exact textual form as in presets.json
+
+
+  // CHANGED: Copy the *current settings* in the exact presets.json shape (ready to paste).
   copy: async () => {
-    const name = presetsCtl.selected;
-    if (!name || name === '(none)' || !_presets || !_presets[name]) {
-      console.warn('[presets] No preset selected to copy.');
-      return;
-    }
-    // Extract the exact property text (including indentation and trailing comma if present)
-    const extractExactSnippet = (raw, presetName) => {
-      const qName = JSON.stringify(presetName); // e.g., "orig_1"
-      const idxKey = raw.indexOf('"presets"');
-      if (idxKey < 0) return null;
-      const idxObjOpen = raw.indexOf('{', idxKey);
-      if (idxObjOpen < 0) return null;
-      // Find end of the "presets" object (brace matching with string awareness)
-      let depth = 0, inStr = false, esc = false, end = -1;
-      for (let i = idxObjOpen; i < raw.length; i++) {
-        const ch = raw[i];
-        if (inStr) {
-          if (esc) { esc = false; }
-          else if (ch === '\\') { esc = true; }
-          else if (ch === '"') { inStr = false; }
-        } else {
-          if (ch === '"') inStr = true;
-          else if (ch === '{') depth++;
-          else if (ch === '}') { depth--; if (depth === 0) { end = i; break; } }
-        }
-      }
-      if (end < 0) return null;
-      const presetsBlockStart = idxObjOpen;
-      const presetsBlockEnd   = end;
-      const block = raw.slice(presetsBlockStart, presetsBlockEnd + 1); // includes braces
-      const relKey = block.indexOf(qName);
-      if (relKey < 0) return null;
-      const absKey = presetsBlockStart + relKey; // index of opening quote of the property name
-      // Prefer start-of-line for nice indentation; if file is minified (no newlines), fall back to absKey
-      const prevNL = raw.lastIndexOf('\n', absKey);
-      const lineStart = (prevNL >= 0) ? (prevNL + 1) : absKey;
-      // Find the value object start after the colon
-      let colon = block.indexOf(':', relKey);
-      if (colon < 0) return null;
-      colon += presetsBlockStart;
-      let i = colon + 1;
-      while (i < raw.length && /\s/.test(raw[i])) i++;
-      if (raw[i] !== '{') return null;
-      const valStart = i;
-      // Find matching close for the value object
-      let d2 = 0, inStr2 = false, esc2 = false, j = valStart;
-      for (; j < raw.length; j++) {
-        const ch = raw[j];
-        if (inStr2) {
-          if (esc2) { esc2 = false; }
-          else if (ch === '\\') { esc2 = true; }
-          else if (ch === '"') { inStr2 = false; }
-        } else {
-          if (ch === '"') inStr2 = true;
-          else if (ch === '{') d2++;
-          else if (ch === '}') { d2--; if (d2 === 0) { break; } }
-        }
-      }
-      if (j >= raw.length) return null;
-      let snippetEnd = j + 1;
-      // Include any immediate trailing comma to mirror the file exactly
-      let k = snippetEnd;
-      while (k < raw.length && /\s/.test(raw[k])) k++;
-      if (raw[k] === ',') snippetEnd = k + 1;
-      return raw.slice(lineStart, snippetEnd);
+    const name = (presetsCtl.selected && presetsCtl.selected !== '(none)') ? presetsCtl.selected : 'new_preset';
+    const toDeg = (r) => THREE.MathUtils.radToDeg(r);
+    const u = surface?.mesh?.material?.userData?._overlayUniforms || null;
+    const overlay = u ? {
+      angle:  toDeg(u.uBandAngle.value),
+      angle2: toDeg(u.uBandAngle2.value),
+      speed:  u.uBandSpeed.value,
+      freq1:  u.uBandFreq1.value,
+      freq2:  u.uBandFreq2.value,
+      strength: u.uBandStrength.value,
+      triScale: u.uTriScale.value,
+      warp:     u.uWarp.value,
+      cellAmp:  u.uCellAmp.value,
+      cellFreq: u.uCellFreq.value
+    } : {
+      // Fallback to UI state if uniforms unavailable
+      angle:  surfaceAdv?.angle ?? 28,
+      angle2: surfaceAdv?.angle2 ?? 82,
+      speed:  surfaceAdv?.speed ?? 0.25,
+      freq1:  surfaceAdv?.freq1 ?? 6.0,
+      freq2:  surfaceAdv?.freq2 ?? 9.5,
+      strength: surfaceAdv?.strength ?? 0.52,
+      triScale: surfaceAdv?.triScale ?? 1.15,
+      warp:     surfaceAdv?.warp ?? 0.55,
+      cellAmp:  surfaceAdv?.cellAmp ?? 0.55,
+      cellFreq: surfaceAdv?.cellFreq ?? 2.75
     };
-    // Legacy copy fallback (execCommand) — used when Clipboard API is unavailable or rejects
+
+    const presetLike = {
+      surface: {
+        primitive:     params.primitive,
+        surfaceJitter: params.surfaceJitter,
+        count:         params.count,
+        amp:           params.amp,
+        freq:          params.freq,
+        connectDist:   params.connectDist,
+        breakDist:     params.breakDist
+      },
+      animation: {
+        play:      params.play,
+        timeScale: params.timeScale
+      },
+      bloom: {
+        bloomStrength:  params.bloomStrength,
+        bloomThreshold: params.bloomThreshold,
+        bloomRadius:    params.bloomRadius
+      },
+      trails: {
+        trailEnabled:    params.trailEnabled,
+        trailPersistence:params.trailPersistence,
+        trailHalfLife:   params.trailHalfLife,
+        trailBlurPx:     params.trailBlurPx,
+        trailBlurSigma:  params.trailBlurSigma,
+        trailGain:       params.trailGain,
+        trailGamma:      params.trailGamma,
+        trailSaturation: params.trailSaturation
+      },
+      rgb: {
+        rgbAmount:   params.rgbAmount,
+        rgbAngle:    params.rgbAngle,
+        rgbAnimate:  params.rgbAnimate,
+        rgbSpinHz:   params.rgbSpinHz,
+        rgbPulseAmp: params.rgbPulseAmp,
+        rgbPulseHz:  params.rgbPulseHz
+      },
+      overlay,
+      reflection: {
+        workflow:            params.reflWorkflow,
+        bgUV:                params.reflBgUV,
+        imageIntervalSec:    params.reflImageIntervalSec,
+        flatShading:         params.reflFlatShading,
+        envIntensity:        params.reflEnvIntensity,
+        roughness:           params.reflRoughness,
+        metalness:           params.reflMetalness,
+        ior:                 params.reflIOR,
+        specularIntensity:   params.reflSpecularIntensity,
+        specularColor:       params.reflSpecularColor,
+        metalColor:          params.reflMetalColor,
+        clearcoat:           params.reflClearcoat,
+        clearcoatRoughness:  params.reflClearcoatRoughness,
+        videoPmremHz:        params.reflVideoUpdateHz,
+        showBackground:      params.reflShowBackground
+      },
+      view: {
+        exposure: params.exposure
+      }
+    };
+
+    // Produce: "name": { ... } indented to drop directly under "presets"
+    const body   = JSON.stringify(presetLike, null, 2);
+    const prop   = `"${name}": ${body}`;
+    const toCopy = prop.replace(/^/gm, '    ');
+
+    // Clipboard write with graceful fallback
     const legacyCopy = (text) => {
       const ta = document.createElement('textarea');
       ta.value = text;
@@ -893,24 +922,15 @@ const presetsCtl = {
       document.body.removeChild(ta);
     };
     try {
-      const res = await fetch(`${PRESETS_URL}?t=${Date.now()}`, { cache: 'no-store' });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const raw = await res.text();
-      const exact = extractExactSnippet(raw, name);
-      const fallback = `"${name}": ${JSON.stringify(_presets[name], null, 2)}`;
-      const toCopy = exact || fallback;
-      try {
-        if (navigator.clipboard && navigator.clipboard.writeText) {
-          await navigator.clipboard.writeText(toCopy); // modern path (requires secure context + user gesture)
-        } else {
-          legacyCopy(toCopy);
-        }
-      } catch {
-        legacyCopy(toCopy); // Clipboard API present but rejected → fall back
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(toCopy);
+      } else {
+        legacyCopy(toCopy);
       }
-      console.info(`[presets] Copied "${name}" to clipboard.`);
-    } catch (err) {
-      console.warn('[presets] Copy failed:', err);
+      console.info(`[presets] Copied CURRENT settings as "${name}".`);
+    } catch {
+      legacyCopy(toCopy);
+      console.info(`[presets] Copied CURRENT settings as "${name}" (fallback).`);
     }
   }
 
