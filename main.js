@@ -30,6 +30,7 @@ scene.background = new THREE.Color(0x000000);
 
 const camera = new THREE.PerspectiveCamera(36, container.clientWidth / container.clientHeight, 0.01, 100);
 camera.position.set(3.2, 1.8, 4.8);
+camera.position.multiplyScalar(1.25); // start a little farther (appears more "zoomed out")
 
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
@@ -1632,4 +1633,5 @@ function onResize() {
 window.addEventListener('resize', onResize);
 new ResizeObserver(onResize).observe(container);
 onResize();
+
 
