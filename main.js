@@ -35,7 +35,7 @@ const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
 controls.dampingFactor = 0.06;
 controls.minDistance = 2.0;
-controls.maxDistance = 9.0;
+controls.maxDistance = 30.0;
 
 // Default environment (RoomEnvironment → can be replaced by reflection.*)
 const pmrem = new THREE.PMREMGenerator(renderer);
@@ -1632,3 +1632,4 @@ function onResize() {
 window.addEventListener('resize', onResize);
 new ResizeObserver(onResize).observe(container);
 onResize();
+
