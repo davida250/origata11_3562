@@ -1,5 +1,75 @@
 {
   "presets": {
+    "gata_1": {
+      "surface": {
+        "primitive": "sphere",
+        "surfaceJitter": 0.12,
+        "count": 48,
+        "amp": 0.90,
+        "freq": 0.95,
+        "connectDist": 1.05,
+        "breakDist": 1.30
+      },
+      "animation": {
+        "play": true,
+        "timeScale": 1.0
+      },
+      "bloom": {
+        "bloomStrength": 0.6,
+        "bloomThreshold": 0.85,
+        "bloomRadius": 0.22
+      },
+      "trails": {
+        "trailEnabled": true,
+        "trailPersistence": 92.0,
+        "trailHalfLife": 0.0,
+        "trailBlurPx": 0.9,
+        "trailBlurSigma": 1.1,
+        "trailGain": 1.1,
+        "trailGamma": 1.0,
+        "trailSaturation": 1.0
+      },
+      "rgb": {
+        "rgbAmount": 0.004,
+        "rgbAngle": 15.0,
+        "rgbAnimate": false,
+        "rgbSpinHz": 0.0,
+        "rgbPulseAmp": 0.0,
+        "rgbPulseHz": 0.5
+      },
+      "overlay": {
+        "angle": 28,
+        "angle2": 82,
+        "speed": 0.25,
+        "freq1": 6.0,
+        "freq2": 9.5,
+        "strength": 0.42,
+        "triScale": 1.15,
+        "warp": 0.55,
+        "cellAmp": 0.55,
+        "cellFreq": 2.75
+      },
+      "reflection": {
+        "workflow": "dielectric",
+        "bgUV": 1.0,
+        "imageIntervalSec": 3.0,        
+        "flatShading": true,
+        "envIntensity": 1.6,
+        "roughness": 0.26,
+        "metalness": 0.0,
+        "ior": 1.3,
+        "specularIntensity": 1.0,
+        "specularColor": "#ffffff",
+        "metalColor": "#ffffff",
+        "clearcoat": 0.0,
+        "clearcoatRoughness": 0.2,
+        "videoPmremHz": 0.0,
+        "showBackground": false
+      },
+      "view": {
+        "exposure": 1.15
+      }
+    },    
     "orig_1": {
       "surface": {
         "primitive": "sphere",
