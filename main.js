@@ -29,7 +29,7 @@ const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x000000);
 
 const camera = new THREE.PerspectiveCamera(36, container.clientWidth / container.clientHeight, 0.01, 100);
-camera.position.set(3.2, 1.8, 10);
+camera.position.set(3.2, 1.8, 11);
 
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
@@ -726,7 +726,7 @@ const params = {
   // View
   exposure: renderer.toneMappingExposure,
   resetCamera: () => {
-    camera.position.set(3.2, 1.8, 4.8);
+    camera.position.set(3.2, 1.8, 11);
     controls.target.set(0,0,0);
     controls.update();
   }
@@ -1632,6 +1632,7 @@ function onResize() {
 window.addEventListener('resize', onResize);
 new ResizeObserver(onResize).observe(container);
 onResize();
+
 
 
 
